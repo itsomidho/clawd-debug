@@ -1,0 +1,13 @@
+{
+  "name": "clawd-debug",
+  "description": "clawd-debug: a step debugger pane for Claude Code",
+  "owner": {
+    "name": "Omid Hosseini"
+  },
+  "plugins": [
+    {
+      "name": "clawd-debug",
+      "source": "./"
+    }
+  ]
+}

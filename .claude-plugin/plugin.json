@@ -1,0 +1,21 @@
+{
+  "name": "clawd-debug",
+  "version": "0.1.0",
+  "description": "A step debugger beside the conversation: set a breakpoint, let Claude run your code with test data, and step line by line while every variable and line value shows",
+  "author": {
+    "name": "Omid Hosseini",
+    "url": "https://github.com/itsomidho"
+  },
+  "license": "MIT",
+  "keywords": [
+    "debugger",
+    "breakpoint",
+    "step",
+    "python",
+    "node",
+    "pane"
+  ],
+  "types": "./types/index.d.ts",
+  "homepage": "https://github.com/itsomidho/clawd-debug",
+  "repository": "https://github.com/itsomidho/clawd-debug"
+}
