@@ -147,7 +147,8 @@ export const register: Register = on => {
     const cwd = await $.session.cwd()
     const file = given.startsWith('/') ? given : `${cwd}/${given}`
     if (!(await $.fs.exists(file))) return { text: `No such file: ${file}` }
-    await update($, shown, () => file)
+    const real = await realPath($, file)
+    await update($, shown, () => real)
     await openPane($)
     const lines = (match?.[2] ?? '').split(',').filter(Boolean).map(Number)
     if (!lines.length) return { text: `Showing ${given}. Click the pane, move to a line, press b for a breakpoint, then t (Claude writes test data and runs it) or r (run the file as it is).` }
@@ -163,7 +164,8 @@ export const register: Register = on => {
     const cwd = input.cwd ?? (await $.session.cwd())
     const program = input.program.startsWith('/') ? input.program : `${cwd}/${input.program}`
     const breakpoints = (input.breakpoints ?? []).map(b => ({ file: b.file.startsWith('/') ? b.file : `${cwd}/${b.file}`, line: Number(b.line) }))
-    await update($, shown, () => breakpoints[0]?.file ?? program)
+    const real = await realPath($, breakpoints[0]?.file ?? program)
+    await update($, shown, () => real)
     await openPane($)
     const answer = await send($, { cmd: 'start', program, cwd, args: input.args ?? [], lang: input.lang, breakpoints, wait: true, timeoutMs: 30000 })
     return { result: answer.ok ? await summary($, answer.state ?? EMPTY) : `Could not start: ${answer.error}` }
@@ -237,6 +239,13 @@ async function testDataPrompt($: EngineInterface, file: string, lines: number[],
     `Keep the harness free of side effects: no database writes, no network calls, no emails, unless I ask.`,
     `When it stops, tell me in two or three lines where it stopped and what the key values are; I will step in the pane.`,
   ].join(' ')
+}
+
+// Where a path really lands (symlinks resolved), as the helper and the
+// debuggers name files; the path itself when it cannot be resolved.
+async function realPath($: EngineInterface, file: string): Promise<string> {
+  const stat = await $.fs.stat(file, { resolve: true }).catch(() => undefined)
+  return stat?.realPath ?? file
 }
 
 async function openPane($: EngineInterface) {

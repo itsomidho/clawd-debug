@@ -1140,15 +1140,17 @@ const commands = {
   async start(input) {
     if (session) await session.stop()
     if (!input.program) throw new Error('start needs "program": the file to run')
-    const program = path.resolve(input.cwd ?? process.cwd(), input.program)
+    // Real paths everywhere: a file reached through a symlink must match what
+    // the debugger reports (it reports the real path).
+    const program = realpath(path.resolve(input.cwd ?? process.cwd(), input.program))
     if (!fs.existsSync(program)) throw new Error(`no such file: ${program}`)
     const lang = langFor(program, input.lang)
-    const config = { program, args: input.args ?? [], cwd: input.cwd ?? path.dirname(program), lang }
+    const config = { program, args: input.args ?? [], cwd: realpath(input.cwd ?? path.dirname(program)), lang }
     lastConfig = config
     if (input.breakpoints) {
       state.breakpoints = {}
       for (const bp of input.breakpoints) {
-        const file = path.resolve(config.cwd, bp.file)
+        const file = realpath(path.resolve(config.cwd, bp.file))
         ;(state.breakpoints[file] ??= []).push({ line: Number(bp.line), verified: false })
       }
     }
@@ -1181,7 +1183,7 @@ const commands = {
   continue: () => need().step('continue'),
   pause: () => need().pause(),
   async setBreakpoints(input) {
-    const file = path.resolve(state.cwd ?? process.cwd(), input.file)
+    const file = realpath(path.resolve(state.cwd ?? process.cwd(), input.file))
     const lines = [...new Set((input.lines ?? []).map(Number))].sort((a, b) => a - b)
     if (lines.length) state.breakpoints[file] = lines.map(line => ({ line, verified: false }))
     else delete state.breakpoints[file]
@@ -1189,7 +1191,7 @@ const commands = {
     emit()
   },
   async toggleBreakpoint(input) {
-    const file = path.resolve(state.cwd ?? process.cwd(), input.file)
+    const file = realpath(path.resolve(state.cwd ?? process.cwd(), input.file))
     const now = (state.breakpoints[file] ?? []).map(b => b.line)
     const line = Number(input.line)
     const lines = now.includes(line) ? now.filter(l => l !== line) : [...now, line]
