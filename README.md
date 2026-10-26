@@ -11,6 +11,8 @@ Works with **Python**, **JavaScript (Node)** and **PHP**, including PHP inside a
 3. Press `t`: Claude writes a small script that calls the code with realistic test data, then starts the run. Or press `r` to run the file as it is.
 4. Step with the keys below and watch the values.
 
+Open rows stay open while you step, and watch expressions are worked out again at every stop (and kept for the next run), so you can follow a value or a condition through the code.
+
 When the code throws an error nobody catches, the run stops on the failing line with its variables, and the error shows in red. A line run more than once (a loop) shows each value it set: `price = 20 → 5.5 (×2)`.
 
 You can also just ask Claude: "debug `calc_total` with test data", "run `register()` with an empty option".
@@ -27,7 +29,9 @@ With [clawd-git](https://github.com/itsomidho/clawd-git) 0.4.4 or later, a ▷ o
 | `↑` `↓` | move the cursor; the details show that line whole and what it set |
 | `←` `→` | slide long lines sideways |
 | `J` `K`, `+` `-` | scroll the details, make them bigger or smaller |
-| `tab`, `?` | Variables / Stack / Output, hide the key hints |
+| `e` | explore the values: `↑` `↓` select, `↵` or `→` expand an object or array, `←` fold it, `e` back to the code |
+| `w` | add a watch expression (typed in the pane, `↵` adds it); `d` on a selected watch removes it |
+| `tab`, `?` | Variables / Watch / Stack / Output, hide the key hints |
 
 `/dbg next`, `/dbg in`, `/dbg out`, `/dbg continue`, `/dbg stop` do the same from the prompt.
 
@@ -43,7 +47,7 @@ Claude's test scripts go in `.clawd-debug/` in your project; Claude adds that fo
 
 ## How it works
 
-A small helper process (`helper/dapd.mjs`) talks to each language's debugger: DAP for Python, the V8 inspector for Node, DBGp for Xdebug. It runs debuggers without a terminal, so they cannot take your terminal from Claude Code. The mod draws the pane and gives Claude four tools: `debug_start`, `debug_step`, `debug_state` and `debug_breakpoints`.
+A small helper process (`helper/dapd.mjs`) talks to each language's debugger: DAP for Python, the V8 inspector for Node, DBGp for Xdebug. It runs debuggers without a terminal, so they cannot take your terminal from Claude Code. The mod draws the pane and gives Claude five tools: `debug_start`, `debug_step`, `debug_state`, `debug_watch` and `debug_breakpoints`.
 
 ## Development
 

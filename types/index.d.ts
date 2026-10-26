@@ -1,5 +1,9 @@
 // One variable as the helper reports it: the value is already text.
-export type Var = { name: string; value: string; type: string; ref: number }
+// children: read when its row is open (expanded) in the pane.
+export type Var = { name: string; value: string; type: string; ref: number; children?: Var[] }
+
+// A watch expression and what it came to at the last stop (error when it failed).
+export type Watch = Var & { expr: string; error?: string }
 
 export type Scope = { name: string; vars: Var[]; ref?: number }
 
@@ -27,6 +31,22 @@ export type DebugState = {
   exitCode: number | null
   error: string | null
   steps: number
+  // Optional: a value stored by 0.2.1 or earlier has neither.
+  watches?: Watch[]
+  // Open rows by path: JSON of the names from the scope (or "Watch") down.
+  expanded?: string[]
+}
+
+// A row of the variable tree or the watches, as the view draws it.
+export type ViewVar = {
+  name: string
+  value: string
+  // The names from the scope (or "Watch") down to this row.
+  path: string[]
+  canExpand: boolean
+  isOpen: boolean
+  children: ViewVar[]
+  error?: string
 }
 
 // What the hooks module hands the view (the Client) to draw.
@@ -42,7 +62,8 @@ export type ViewProps = {
   reason: string
   frame: string
   steps: number
-  scopes: { name: string; vars: { name: string; value: string }[] }[]
+  scopes: { name: string; vars: ViewVar[] }[]
+  watches: ViewVar[]
   frames: Frame[]
   output: string[]
   note: string
@@ -56,6 +77,8 @@ export type ViewMessage =
   | { cmd: 'toggleBreakpoint'; line: number }
   // t: ask Claude to write test data for the breakpoints (or the cursor's function) and start.
   | { cmd: 'testData'; line: number }
+  | { cmd: 'addWatch' | 'removeWatch'; expr: string }
+  | { cmd: 'toggleExpand'; path: string[] }
 
 declare module 'claude-code' {
   interface PluginState {

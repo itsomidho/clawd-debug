@@ -3,15 +3,20 @@
 // keys (cursor, scroll, tabs) stay here.
 import type { ClientModule, RenderElement } from 'claude-code'
 
-import type { ViewMessage, ViewProps } from '../types'
+import type { ViewMessage, ViewProps, ViewVar } from '../types'
 
-type Tab = 'vars' | 'stack' | 'output'
+type Tab = 'vars' | 'watch' | 'stack' | 'output'
 // cursor/top: the code window; left: how far long lines slid sideways;
 // lowerTop: the details' scroll; split: the details' share of the rows.
-type Local = { cursor: number; top: number; tab: Tab; followed: string; left: number; lowerTop: number; split: number; isHelpHidden?: boolean }
+// isDetails: the keys move a selection in the details (e); sel: which row;
+// typing: a watch expression being typed (w), null when none.
+type Local = {
+  cursor: number; top: number; tab: Tab; followed: string; left: number; lowerTop: number; split: number
+  isHelpHidden?: boolean; isDetails?: boolean; sel?: number; typing?: string | null
+}
 
-const TABS: Tab[] = ['vars', 'stack', 'output']
-const TAB_NAMES: Record<Tab, string> = { vars: 'Variables', stack: 'Stack', output: 'Output' }
+const TABS: Tab[] = ['vars', 'watch', 'stack', 'output']
+const TAB_NAMES: Record<Tab, string> = { vars: 'Variables', watch: 'Watch', stack: 'Stack', output: 'Output' }
 
 const STEP_KEYS: Record<string, ViewMessage['cmd']> = {
   n: 'next',
@@ -32,9 +37,11 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   // Follow the program: when it stops somewhere new, the cursor goes there.
   const spot = `${props.file}:${props.current ?? ''}:${props.steps}`
   let local: Local = { cursor: props.current ?? props.firstLine, top: props.firstLine, tab: 'vars', followed: '', left: 0, lowerTop: 0, split: 0.4, ...surface.state }
-  // The keys, wrapped onto as many rows as the width needs (? hides them).
-  const help = props.note ? [] : local.isHelpHidden ? [[{ key: '?', label: 'keys' }]] : packKeys(KEYS, columns)
-  const helpRows = props.note ? 1 : help.length
+  // The keys, wrapped onto as many rows as the width needs (? hides them);
+  // the details' own keys while they hold the keys, the field while typing.
+  const keys = local.typing != null ? TYPING_KEYS : local.isDetails ? DETAIL_KEYS : KEYS
+  const help = props.note ? [] : local.isHelpHidden && local.typing == null ? [[{ key: '?', label: 'keys' }]] : packKeys(keys, columns)
+  const helpRows = (props.note ? 1 : help.length) + (local.typing != null ? 1 : 0)
   const lowerRows = Math.max(4, Math.min(rows - 4 - helpRows, Math.floor(rows * local.split)))
   const codeRows = Math.max(3, rows - 2 - helpRows - lowerRows)
   if (local.followed !== spot && props.current != null) {
@@ -42,33 +49,6 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   }
   local = { ...local, top: keepVisible(local.cursor, local.top, codeRows, props.firstLine, last) }
   if (!surface.state || surface.state.followed !== local.followed) surface.setState(local)
-
-  surface.onKey(event => {
-    const at: Local = { ...local, ...surface.state }
-    const step = STEP_KEYS[event.key]
-    if (step && !event.ctrl && !event.meta) return surface.post({ cmd: step })
-    if (event.key === 'b' || event.key === 'return') return surface.post({ cmd: 'toggleBreakpoint', line: at.cursor })
-    if (event.key === 't') return surface.post({ cmd: 'testData', line: at.cursor })
-    if (event.key === '?') return surface.setState({ ...at, isHelpHidden: !at.isHelpHidden })
-    if (event.key === 'tab') return surface.setState({ ...at, tab: TABS[(TABS.indexOf(at.tab) + 1) % TABS.length] ?? 'vars', lowerTop: 0 })
-    // The details below the code: J/K (or shift+↓/↑) scroll them, + and - resize them.
-    const scroll = event.key === 'J' || (event.shift && event.key === 'down') ? 1 : event.key === 'K' || (event.shift && event.key === 'up') ? -1 : 0
-    if (scroll) return surface.setState({ ...at, lowerTop: Math.max(0, at.lowerTop + scroll * 3) })
-    if (event.key === '+' || event.key === '=') return surface.setState({ ...at, split: Math.min(0.75, at.split + 0.1) })
-    if (event.key === '-' || event.key === '_') return surface.setState({ ...at, split: Math.max(0.2, at.split - 0.1) })
-    // Long code lines slide sideways.
-    const side = { left: -8, h: -8, right: 8, l: 8 }[event.key]
-    if (side) return surface.setState({ ...at, left: Math.max(0, at.left + side) })
-    if (event.key === 'home' || event.key === '0') return surface.setState({ ...at, left: 0 })
-    const move = { up: -1, down: 1, k: -1, j: 1, pageup: -codeRows, pagedown: codeRows }[event.key]
-    if (move) {
-      const cursor = clamp(at.cursor + move, props.firstLine, last)
-      return surface.setState({ ...at, cursor, top: keepVisible(cursor, at.top, codeRows, props.firstLine, last), lowerTop: 0 })
-    }
-    if (event.key === 'g' && props.current != null) {
-      return surface.setState({ ...at, cursor: props.current, top: around(props.current, codeRows, props.firstLine, last) })
-    }
-  })
 
   const numberWidth = String(last).length
   const lang = langOf(props.file)
@@ -101,8 +81,67 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   const tabBar = TABS.map(tab => (tab === local.tab ? `[${TAB_NAMES[tab]}]` : ` ${TAB_NAMES[tab]} `)).join(' ')
   const all = lowerPanel(props, local.tab, local.cursor, columns - 1)
   const room = lowerRows - 1
-  // Output follows its end; the rest start at the top and scroll with J/K.
-  const lowerTop = local.tab === 'output' && local.lowerTop === 0 ? Math.max(0, all.length - room) : Math.min(local.lowerTop, Math.max(0, all.length - room))
+  // The rows that can be selected (a variable, a watch): their first row each.
+  const items = all.flatMap((row, i) => (row.item && row.isFirst ? [i] : []))
+  const sel = clamp(local.sel ?? 0, 0, Math.max(0, items.length - 1))
+  const selRow = local.isDetails ? items[sel] : undefined
+  const selItem = selRow != null ? all[selRow]?.item : undefined
+  // Output follows its end; the rest start at the top and scroll with J/K;
+  // a selected row is kept in sight.
+  let lowerTop = local.tab === 'output' && local.lowerTop === 0 ? Math.max(0, all.length - room) : Math.min(local.lowerTop, Math.max(0, all.length - room))
+  if (selRow != null) lowerTop = selRow < lowerTop ? selRow : selRow >= lowerTop + room ? selRow - room + 1 : lowerTop
+
+  surface.onKey(event => {
+    const at: Local = { ...local, ...surface.state }
+    // Typing a watch expression: every key goes to the field.
+    if (at.typing != null) {
+      if (event.key === 'return') {
+        if (at.typing.trim()) surface.post({ cmd: 'addWatch', expr: at.typing.trim() })
+        return surface.setState({ ...at, typing: null, tab: at.typing.trim() ? 'watch' : at.tab })
+      }
+      if (event.key === 'backspace' || event.key === 'delete') return surface.setState({ ...at, typing: at.typing.slice(0, -1) })
+      const ch = event.key === 'space' ? ' ' : event.key
+      if (ch.length === 1 && !event.ctrl && !event.meta) return surface.setState({ ...at, typing: at.typing + ch })
+      return
+    }
+    if (event.key === 'w') return surface.setState({ ...at, typing: '' })
+    if (event.key === 'e') return surface.setState({ ...at, isDetails: !at.isDetails, sel: at.sel ?? 0 })
+    if (at.isDetails) {
+      const by = { up: -1, k: -1, down: 1, j: 1, pageup: -room, pagedown: room }[event.key]
+      if (by) return surface.setState({ ...at, sel: clamp(sel + by, 0, Math.max(0, items.length - 1)) })
+      if (selItem && selItem.canExpand && (event.key === 'return' || ((event.key === 'right' || event.key === 'l') && !selItem.isOpen) || ((event.key === 'left' || event.key === 'h') && selItem.isOpen))) {
+        return surface.post({ cmd: 'toggleExpand', path: selItem.path })
+      }
+      if (selItem?.isWatch && (event.key === 'd' || event.key === 'delete' || event.key === 'backspace')) {
+        return surface.post({ cmd: 'removeWatch', expr: selItem.path[1] ?? '' })
+      }
+      if (['left', 'right', 'h', 'l', 'return'].includes(event.key)) return
+    }
+    const step = STEP_KEYS[event.key]
+    if (step && !event.ctrl && !event.meta) return surface.post({ cmd: step })
+    if (event.key === 'b' || event.key === 'return') return surface.post({ cmd: 'toggleBreakpoint', line: at.cursor })
+    if (event.key === 't') return surface.post({ cmd: 'testData', line: at.cursor })
+    if (event.key === '?') return surface.setState({ ...at, isHelpHidden: !at.isHelpHidden })
+    if (event.key === 'tab') return surface.setState({ ...at, tab: TABS[(TABS.indexOf(at.tab) + 1) % TABS.length] ?? 'vars', lowerTop: 0, sel: 0 })
+    // The details below the code: J/K (or shift+↓/↑) scroll them, + and - resize them.
+    const scroll = event.key === 'J' || (event.shift && event.key === 'down') ? 1 : event.key === 'K' || (event.shift && event.key === 'up') ? -1 : 0
+    if (scroll) return surface.setState({ ...at, lowerTop: Math.max(0, at.lowerTop + scroll * 3) })
+    if (event.key === '+' || event.key === '=') return surface.setState({ ...at, split: Math.min(0.75, at.split + 0.1) })
+    if (event.key === '-' || event.key === '_') return surface.setState({ ...at, split: Math.max(0.2, at.split - 0.1) })
+    // Long code lines slide sideways.
+    const side = { left: -8, h: -8, right: 8, l: 8 }[event.key]
+    if (side) return surface.setState({ ...at, left: Math.max(0, at.left + side) })
+    if (event.key === 'home' || event.key === '0') return surface.setState({ ...at, left: 0 })
+    const move = { up: -1, down: 1, k: -1, j: 1, pageup: -codeRows, pagedown: codeRows }[event.key]
+    if (move) {
+      const cursor = clamp(at.cursor + move, props.firstLine, last)
+      return surface.setState({ ...at, cursor, top: keepVisible(cursor, at.top, codeRows, props.firstLine, last), lowerTop: 0 })
+    }
+    if (event.key === 'g' && props.current != null) {
+      return surface.setState({ ...at, cursor: props.current, top: around(props.current, codeRows, props.firstLine, last) })
+    }
+  })
+
   const lower = all.slice(lowerTop, lowerTop + room)
   const more = all.length > room ? ` ${lowerTop + 1}-${Math.min(all.length, lowerTop + room)}/${all.length} J/K ` : ''
 
@@ -111,6 +150,7 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
       <Text wrap="truncate-end" bold color={props.error ? 'red' : STATUS_COLOR[props.status]}>
         {headline(props)}
       </Text>
+      {local.typing != null && <Text wrap="truncate-end"><Text color={KEY_COLOR} bold>watch: </Text>{local.typing}<Text inverse> </Text></Text>}
       {props.note
         ? <Text wrap="truncate-end" dimColor>{props.note}</Text>
         : help.map((row, i) => (
@@ -126,10 +166,11 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
       <Box flexDirection="column" height={codeRows} overflow="hidden">
         {props.lines.length ? codeLines : <Text dimColor>{'Nothing to show yet. Ask Claude to debug a function, or run /dbg <file>:<line>.'}</Text>}
       </Box>
-      <Text dimColor wrap="truncate-end">{`${'─'.repeat(2)} ${tabBar} ${'─'.repeat(Math.max(0, columns - tabBar.length - more.length - 4))}${more}`}</Text>
+      <Text dimColor={!local.isDetails} color={local.isDetails ? KEY_COLOR : undefined} wrap="truncate-end">{`${local.isDetails ? '▸▸' : '──'} ${tabBar} ${'─'.repeat(Math.max(0, columns - tabBar.length - more.length - 4))}${more}`}</Text>
       <Box flexDirection="column" height={lowerRows - 1} overflow="hidden">
         {lower.map((line, i) => (
-          <Text key={`d${i}`} wrap="truncate-end" color={line.color} dimColor={line.dim} bold={line.bold}>{line.text || ' '}</Text>
+          <Text key={`d${i}`} wrap="truncate-end" color={line.color} dimColor={line.dim} bold={line.bold}
+            inverse={selRow != null && line.owner === all[selRow]?.owner}>{line.text || ' '}</Text>
         ))}
       </Box>
     </Box>
@@ -177,7 +218,23 @@ const KEYS: KeyHelp[] = [
   { key: 'J/K', label: 'scroll details' },
   { key: '+/-', label: 'size' },
   { key: 'tab', label: 'panel' },
+  { key: 'e', label: 'explore values' },
+  { key: 'w', label: 'watch' },
   { key: '?', label: 'hide keys' },
+]
+const DETAIL_KEYS: KeyHelp[] = [
+  { key: '↑↓', label: 'select' },
+  { key: '↵ →', label: 'expand' },
+  { key: '←', label: 'collapse' },
+  { key: 'd', label: 'remove watch' },
+  { key: 'w', label: 'add watch' },
+  { key: 'tab', label: 'panel' },
+  { key: 'n s o c', label: 'step' },
+  { key: 'e', label: 'back to the code' },
+]
+const TYPING_KEYS: KeyHelp[] = [
+  { key: '↵', label: 'add the watch (empty: cancel)' },
+  { key: '⌫', label: 'delete' },
 ]
 const KEY_COLOR = '#e5c07b'
 
@@ -194,14 +251,28 @@ function packKeys(keys: KeyHelp[], width: number): KeyHelp[][] {
   return rows
 }
 
-type Row = { text: string; color?: string; dim?: boolean; bold?: boolean }
+// item: a row that can be selected (its first row); owner: which entry a
+// wrapped row belongs to, so all its rows light up together.
+type Item = { path: string[]; canExpand: boolean; isOpen: boolean; isWatch: boolean }
+type Row = { text: string; color?: string; dim?: boolean; bold?: boolean; item?: Item; isFirst?: boolean; owner?: number }
 
 // Everything the details can show, each long value wrapped onto as many rows
 // as it needs (the panel scrolls them), never cut at the edge.
 function lowerPanel(props: ViewProps, tab: Tab, cursor: number, width: number): Row[] {
   const out: Row[] = []
-  const add = (text: string, style: Omit<Row, 'text'> = {}, indent = 0) => {
-    for (const piece of wrap(text, width, indent)) out.push({ text: piece, ...style })
+  let owner = 0
+  const add = (text: string, style: Omit<Row, 'text'> = {}, indent = 0, item?: Item) => {
+    owner += 1
+    wrap(text, width, indent).forEach((piece, i) => out.push({ text: piece, ...style, owner, ...(item ? { item, isFirst: i === 0 } : {}) }))
+  }
+  // A variable and, when open, its children: ▸ closed, ▾ open.
+  const tree = (v: ViewVar, depth: number, isWatch: boolean, color?: string) => {
+    const pad = '  '.repeat(depth + 1)
+    const mark = v.canExpand ? (v.isOpen ? '▾ ' : '▸ ') : '  '
+    const item = { path: v.path, canExpand: v.canExpand, isOpen: v.isOpen, isWatch: isWatch && depth === 0 }
+    if (v.error) add(`${pad}${mark}${v.name}: ${v.error}`, { color: 'red' }, pad.length + 4, item)
+    else add(`${pad}${mark}${v.name} = ${v.value}`, { color }, pad.length + 4, item)
+    if (v.isOpen) for (const c of v.children) tree(c, depth + 1, isWatch)
   }
   if (tab === 'vars') {
     // The line under the cursor, whole, and what it set.
@@ -221,8 +292,12 @@ function lowerPanel(props: ViewProps, tab: Tab, cursor: number, width: number): 
     for (const scope of props.scopes) {
       add(scope.name, { bold: true })
       if (!scope.vars.length) add('  (none)', { dim: true })
-      for (const v of scope.vars) add(`  ${v.name} = ${v.value}`, { color: v.name.startsWith('↩') || /^\(return\)|^Return value/.test(v.name) ? VALUES : undefined }, 4)
+      for (const v of scope.vars) tree(v, 0, false, v.name.startsWith('↩') || /^\(return\)|^Return value/.test(v.name) ? VALUES : undefined)
     }
+  } else if (tab === 'watch') {
+    if (!props.watches.length) add('No watch expressions. Press w to add one: it is worked out at every stop.', { dim: true })
+    else if (props.status !== 'paused') add('Watches are worked out while the program is paused.', { dim: true })
+    for (const w of props.watches) tree(w, 0, true)
   } else if (tab === 'stack') {
     if (!props.frames.length) add('The call stack shows while the program is paused.', { dim: true })
     props.frames.forEach((f, i) => add(`${i === 0 ? '▶' : ' '} ${f.name}  ${f.file.split('/').pop()}:${f.line}`, { bold: i === 0 }, 4))

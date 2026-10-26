@@ -144,3 +144,77 @@ test('stopped on an error: the headline and the details show it, and Claude read
   const out = await $.tool.call({ tool: 'mcp__clawd-debug__debug_state' } as any)
   expect(String((out as { result?: unknown }).result)).toContain(`Stopped on an uncaught error: ${error}`)
 })
+
+const WATCHED = {
+  ...PAUSED,
+  scopes: [{ name: 'Locals', vars: [
+    { name: 'items', value: '[1, 2]', type: 'list', ref: 7, children: [
+      { name: '0', value: '1', type: 'int', ref: 0 },
+      { name: '1', value: '2', type: 'int', ref: 0 },
+    ] },
+    { name: 'subtotal', value: '0', type: 'int', ref: 0 },
+  ] }],
+  watches: [
+    { expr: 'subtotal * 2', name: 'subtotal * 2', value: '0', type: 'int', ref: 0 },
+    { expr: 'nope', name: 'nope', value: '', type: '', ref: 0, error: "NameError: name 'nope' is not defined" },
+  ],
+  expanded: ['["Locals","items"]'],
+}
+
+test('w types a watch expression and Enter adds it', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  for (const key of ['w', 'n', '+', '1']) await ui.key({ key, in: 'view' })
+  expect(await ui.find({ type: 'Text', text: 'n+1', in: 'view' })).toBeDefined()
+  // While typing, n is a letter, not a step.
+  expect(sent.some(one => one.cmd === 'next')).toBe(false)
+  await ui.key({ key: 'return', in: 'view' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'addWatch', expr: 'n+1' })
+  await ui.unmount()
+})
+
+test('the Watch tab shows each watch, its value or its error', async ($, on) => {
+  engine(on, [], WATCHED)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  await ui.key({ key: 'tab', in: 'view' })
+  expect(await ui.find({ type: 'Text', text: /subtotal \* 2 = 0$/, in: 'view' })).toBeDefined()
+  const error = await ui.find({ type: 'Text', text: /nope: NameError/, in: 'view' })
+  expect(error?.props.color).toBe('red')
+  await ui.unmount()
+})
+
+test('e moves the keys into the details: an open row shows its children, Enter folds it', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent, WATCHED)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /▾ items = \[1, 2\]$/, in: 'view' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {6}0 = 1$/, in: 'view' })).toBeDefined()
+  await ui.key({ key: 'e', in: 'view' })
+  // The first selectable row is items (the Line section above is not selectable).
+  await ui.key({ key: 'return', in: 'view' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleExpand', path: ['Locals', 'items'] })
+  // In the details, ↓ moves the selection, not the code cursor; b still sets a breakpoint.
+  await ui.key({ key: 'down', in: 'view' })
+  await ui.key({ key: 'down', in: 'view' })
+  await ui.key({ key: 'down', in: 'view' })
+  await ui.key({ key: 'b', in: 'view' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleBreakpoint', line: 4 })
+  await ui.unmount()
+})
+
+test('d on a selected watch removes it', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent, WATCHED)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  await ui.key({ key: 'tab', in: 'view' })
+  await ui.key({ key: 'e', in: 'view' })
+  await ui.key({ key: 'down', in: 'view' })
+  await ui.key({ key: 'd', in: 'view' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'removeWatch', expr: 'nope' })
+  await ui.unmount()
+})

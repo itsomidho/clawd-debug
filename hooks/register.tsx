@@ -7,7 +7,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { DebugState, ViewMessage, ViewProps } from '../types'
+import type { DebugState, Var, ViewMessage, ViewProps, ViewVar, Watch } from '../types'
 
 const PLUGIN = 'clawd-debug'
 const PANE = 'debug'
@@ -59,10 +59,13 @@ export const register: Register = on => {
                 socket = message.socket
                 resolveReady(socket)
                 // A reload starts a fresh helper: give it the breakpoints the pane still shows.
-                const kept = (await read($, dbg)).breakpoints
-                for (const [file, list] of Object.entries(kept)) {
+                const kept = await read($, dbg)
+                for (const [file, list] of Object.entries(kept.breakpoints)) {
                   if (list.length) await send($, { cmd: 'setBreakpoints', file, lines: list.map(b => b.line) })
                 }
+                // ...and its watches and open rows.
+                const watches = (kept.watches ?? []).map(w => w.expr)
+                if (watches.length || kept.expanded?.length) await send($, { cmd: 'restore', watches, expanded: kept.expanded ?? [] })
               }
               else if (message.type === 'state' && message.state) {
                 const st = message.state
@@ -101,6 +104,14 @@ export const register: Register = on => {
     if (data.cmd === 'toggleBreakpoint') {
       const file = st.stop?.file ?? ((await read($, shown)) || st.program || '')
       if (file && Number.isInteger(data.line)) await send($, { cmd: 'toggleBreakpoint', file, line: data.line })
+      return {}
+    }
+    if (data.cmd === 'addWatch' || data.cmd === 'removeWatch') {
+      if (typeof data.expr === 'string' && data.expr.trim()) await send($, { cmd: data.cmd, expr: data.expr })
+      return {}
+    }
+    if (data.cmd === 'toggleExpand') {
+      if (Array.isArray(data.path) && data.path.every(p => typeof p === 'string')) await send($, { cmd: 'toggleExpand', path: data.path })
       return {}
     }
     if (data.cmd === 'testData') {
@@ -198,6 +209,18 @@ export const register: Register = on => {
     return { result: await summary($, await read($, dbg)) }
   }).catch(() => ({ result: 'The state could not be read.' }))
 
+  on('tool.call', { tool: /^mcp__clawd-debug__debug_watch$/ }, async ($, e) => {
+    const input = e as unknown as { add?: string[]; remove?: string[] }
+    for (const expr of input.remove ?? []) await send($, { cmd: 'removeWatch', expr })
+    let answer: Answer = { ok: true }
+    for (const expr of input.add ?? []) answer = await send($, { cmd: 'addWatch', expr })
+    if (!answer.ok) return { result: `Not added: ${answer.error}` }
+    const watches = (await read($, dbg)).watches ?? []
+    const st = answer.state ?? (await read($, dbg))
+    const list = (st.watches ?? watches).map(w => (w.error ? `  ${w.expr}: ${w.error}` : `  ${w.expr} = ${w.value || '(evaluated at the next stop)'}`))
+    return { result: list.length ? `Watch:\n${list.join('\n')}` : 'No watch expressions.' }
+  }).catch(() => ({ result: 'The watch expressions could not be changed.' }))
+
   on('tool.call', { tool: /^mcp__clawd-debug__debug_breakpoints$/ }, async ($, e) => {
     const input = e as unknown as { file?: string; lines?: number[] }
     if (!input.file) return { result: 'debug_breakpoints needs "file".' }
@@ -286,7 +309,8 @@ async function viewProps($: EngineInterface): Promise<ViewProps> {
     error: st.status === 'paused' ? st.stop?.error ?? '' : '',
     frame: st.stop?.frame ?? '',
     steps: st.steps,
-    scopes: st.scopes.map(s => ({ name: s.name, vars: s.vars.slice(0, 60).map(v => ({ name: v.name, value: v.value })) })),
+    scopes: st.scopes.map(s => ({ name: s.name, vars: s.vars.slice(0, 60).map(v => viewVar(v, [s.name], st.expanded ?? [])) })),
+    watches: (st.watches ?? []).map(w => viewVar(w, ['Watch'], st.expanded ?? [])),
     frames: st.frames.slice(0, 30),
     output: output.slice(-200),
     note: st.status === 'error' ? st.error ?? '' : st.status === 'ended' && st.exitCode != null ? `exited with code ${st.exitCode} · r to run again` : '',
@@ -308,7 +332,11 @@ async function summary($: EngineInterface, st: DebugState, context = 3): Promise
     for (const scope of st.scopes) {
       if (!scope.vars.length) continue
       out.push(`${scope.name}:`)
-      for (const v of scope.vars.slice(0, 40)) out.push(`  ${v.name} = ${v.value}${v.ref ? `  [expand: ${v.ref}]` : ''}`)
+      for (const v of scope.vars.slice(0, 40)) out.push(...varLines(v, 1))
+    }
+    if (st.watches?.length) {
+      out.push('Watch:')
+      for (const w of st.watches) out.push(w.error ? `  ${w.expr}: ${w.error}` : varLines(w, 1).join('\n'))
     }
     if (st.frames.length > 1) out.push(`Call stack: ${st.frames.map(f => `${f.name} (${name(f.file)}:${f.line})`).join(' < ')}`)
   } else if (st.status === 'ended') {
@@ -330,6 +358,29 @@ async function summary($: EngineInterface, st: DebugState, context = 3): Promise
   const output = st.output.filter(o => o.category !== 'adapter').map(o => o.text).join('').trimEnd()
   if (output) out.push(`Output:\n${output.split('\n').slice(-15).map(l => `  ${l}`).join('\n')}`)
   return out.join('\n')
+}
+
+// A helper variable as a row of the view's tree, with its path and children.
+function viewVar(v: Var | Watch, prefix: string[], expanded: string[]): ViewVar {
+  const path = [...prefix, v.name]
+  return {
+    name: v.name,
+    value: v.value,
+    path,
+    canExpand: v.ref > 0,
+    isOpen: expanded.includes(JSON.stringify(path)),
+    children: (v.children ?? []).slice(0, 60).map(c => viewVar(c, path, expanded)),
+    ...('error' in v && v.error ? { error: v.error } : {}),
+  }
+}
+
+// A variable and its open children, indented, for Claude.
+function varLines(v: Var, depth: number): string[] {
+  const pad = '  '.repeat(depth)
+  return [
+    `${pad}${v.name} = ${v.value}${v.ref ? `  [expand: ${v.ref}]` : ''}`,
+    ...(v.children ?? []).slice(0, 40).flatMap(c => varLines(c, depth + 1)),
+  ]
 }
 
 async function loadSource($: EngineInterface, file: string): Promise<string[]> {
@@ -386,6 +437,17 @@ const TOOLS = [
       properties: {
         expression: { type: 'string' },
         expand: { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'debug_watch',
+    description: 'Add or remove watch expressions in the clawd-debug pane: they are evaluated at every stop and shown in its Watch tab (and in debug_state). Use for a value worth following across steps, like a total or a condition.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        add: { type: 'array', items: { type: 'string' } },
+        remove: { type: 'array', items: { type: 'string' } },
       },
     },
   },

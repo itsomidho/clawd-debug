@@ -172,6 +172,37 @@ describe('Node', () => {
     assert.deepEqual(toggled.state.breakpoints[calc].map(b => b.line), [4, 5])
   })
 
+  test('watches are worked out at every stop, errors included, and outlive the run', async () => {
+    await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 5 }] })
+    await helper.request('POST', '/cmd', { cmd: 'addWatch', expr: 'subtotal + price' })
+    const added = await helper.request('POST', '/cmd', { cmd: 'addWatch', expr: 'nope.x' })
+    assert.deepEqual(added.state.watches.map(w => [w.expr, w.value, w.error ?? '']), [
+      ['subtotal + price', '20', ''],
+      ['nope.x', '', 'ReferenceError: nope is not defined'],
+    ])
+    const { state } = await helper.cmd({ cmd: 'continue' })
+    assert.equal(state.stop.line, 5)
+    assert.equal(state.watches[0].value, '25.5')
+    const again = await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 5 }] })
+    assert.deepEqual(again.state.watches.map(w => w.expr), ['subtotal + price', 'nope.x'])
+    await helper.request('POST', '/cmd', { cmd: 'removeWatch', expr: 'nope.x' })
+    assert.deepEqual((await helper.state()).watches.map(w => w.expr), ['subtotal + price'])
+  })
+
+  test('an open row shows its children, and stays open while stepping', async () => {
+    await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 4 }] })
+    await helper.request('POST', '/cmd', { cmd: 'toggleExpand', path: ['Locals', 'items'] })
+    const opened = await helper.request('POST', '/cmd', { cmd: 'toggleExpand', path: ['Locals', 'items', '1'] })
+    const items = opened.state.scopes[0].vars.find(v => v.name === 'items')
+    assert.deepEqual(items.children.map(c => c.name), ['0', '1', 'length'])
+    assert.deepEqual(items.children[1].children.map(c => `${c.name}=${c.value}`), ['price=5.5', 'qty=1'])
+    const { state } = await helper.cmd({ cmd: 'next' })
+    assert.ok(state.scopes[0].vars.find(v => v.name === 'items').children, 'still open after a step')
+    // Closing a row closes what is open under it.
+    await helper.request('POST', '/cmd', { cmd: 'toggleExpand', path: ['Locals', 'items'] })
+    assert.deepEqual((await helper.state()).expanded, [])
+  })
+
   test('a new run started while one is paused answers for the new run', async () => {
     await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 2 }] })
     const { state } = await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 2 }] })
@@ -197,6 +228,14 @@ describe('Python', { skip: !HAS_DEBUGPY && 'debugpy is not installed (/dbg setup
     assert.equal(valuesAt(end, calc, 4).price, '20 → 5.5 (×2)')
     assert.equal(valuesAt(end, calc, 7).total, '27.79')
     assert.equal(valuesAt(end, calc, 13)['↩ calc_total'], '27.79')
+  })
+
+  test('watches and open rows work in Python too', async () => {
+    await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 5 }] })
+    await helper.request('POST', '/cmd', { cmd: 'addWatch', expr: 'subtotal + price' })
+    const { state } = await helper.request('POST', '/cmd', { cmd: 'toggleExpand', path: ['Locals', 'item'] })
+    assert.equal(state.watches[0].value, '20')
+    assert.deepEqual(state.scopes[0].vars.find(v => v.name === 'item').children.map(c => `${c.name}=${c.value}`).slice(0, 2), ["'price'=10", "'qty'=2"])
   })
 
   test('an uncaught error stops on its line, with the error and the variables', async () => {
@@ -238,6 +277,16 @@ describe('PHP (Xdebug in Docker)', { skip: !PHP_DIR && 'set CLAWD_DEBUG_PHP_DIR 
     const end = await stepTo(helper, lib, 10, 20)
     assert.equal(valuesAt(end, lib, 7).$price, '20 → 5.5 (×2)')
     assert.equal(valuesAt(end, lib, 8).$sum, '20 → 25.5 (×2)')
+  })
+
+  test('watches and open rows work in PHP too', async () => {
+    const lib = at('lib.php')
+    await helper.cmd({ cmd: 'start', program: at('check_total.php'), cwd: PHP_DIR, breakpoints: [{ file: lib, line: 7 }], timeoutMs: 120_000 })
+    await helper.request('POST', '/cmd', { cmd: 'addWatch', expr: 'count($items)' })
+    const { state } = await helper.request('POST', '/cmd', { cmd: 'toggleExpand', path: ['Locals', '$item'] })
+    assert.equal(state.watches[0].value, '2')
+    assert.deepEqual(state.scopes[0].vars.find(v => v.name === '$item').children.map(c => `${c.name}=${c.value}`), ['price=10', 'qty=2'])
+    await helper.request('POST', '/cmd', { cmd: 'removeWatch', expr: 'count($items)' })
   })
 
   test('a breakpoint in the harness itself stops', async () => {

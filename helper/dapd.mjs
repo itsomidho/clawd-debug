@@ -42,6 +42,12 @@ const state = {
   frames: [], // [{ name, file, line }]
   scopes: [], // [{ name, vars: [{ name, value, type, ref }] }]
   lineValues: {}, // file -> line -> { name: value }, what each line changed
+  // Expressions evaluated at every stop: [{ expr, name, value, type, ref, error?, children? }].
+  // Kept across runs.
+  watches: [],
+  // Open rows of the variable tree and the watches, by path (JSON of the
+  // names from the scope or "Watch" down): their children are read at every stop.
+  expanded: [],
   output: [], // [{ category, text }]
   exitCode: null,
   error: null,
@@ -258,9 +264,10 @@ class Base {
   }
 
   // error: the uncaught error it stopped on ("KeyError: 'missing'"), if any.
-  publish(frames, scopes, reason, error) {
+  async publish(frames, scopes, reason, error) {
     const top = frames[0]
     this.recordLineValues(frames, scopes)
+    await this.decorate(scopes).catch(error => addOutput('clawd-debug', `${error.message}\n`))
     state.status = 'paused'
     state.steps += 1
     state.stop = top ? { reason, file: top.file, line: top.line, frame: top.name } : { reason }
@@ -305,6 +312,34 @@ class Base {
     this.prev = { key, file: top.file, line: top.line, depth: frames.length, locals }
   }
 
+  // Reads the children of every open row, and evaluates the watches, at a stop.
+  async decorate(scopes) {
+    const open = new Set(state.expanded)
+    const fill = async (vars, prefix, depth) => {
+      for (const v of vars) {
+        const at = [...prefix, v.name]
+        if (v.ref && open.has(pathKey(at)) && depth < 6) {
+          v.children = (await this.expand(v.ref).catch(() => [])).slice(0, MAX_VARS)
+          await fill(v.children, at, depth + 1)
+        } else {
+          delete v.children
+        }
+      }
+    }
+    for (const scope of scopes) await fill(scope.vars, [scope.name], 0)
+    const watches = []
+    for (const { expr } of state.watches) {
+      try {
+        const answer = await this.evaluate(expr, 'watch')
+        watches.push({ expr, name: expr, value: answer.result, type: answer.type ?? '', ref: answer.ref ?? 0 })
+      } catch (error) {
+        watches.push({ expr, name: expr, value: '', type: '', ref: 0, error: clip(String(error.message).split('\n')[0]) })
+      }
+    }
+    await fill(watches, ['Watch'], 0)
+    state.watches = watches
+  }
+
   end() {
     if (this.ended) return
     this.ended = true
@@ -322,6 +357,10 @@ const MAX_VALUE = 400
 function clip(text) {
   const value = String(text ?? '')
   return value.length > MAX_VALUE ? `${value.slice(0, MAX_VALUE - 1)}…` : value
+}
+
+function pathKey(names) {
+  return JSON.stringify(names)
 }
 
 function isReturn(name) {
@@ -448,7 +487,7 @@ class Debug extends Base {
       const info = await dap.request('exceptionInfo', { threadId }).catch(() => null)
       error = info ? [info.exceptionId, info.description].filter(Boolean).join(': ') : body.text || body.description || 'exception'
     }
-    this.publish(frames, scopes, body.reason ?? 'pause', error)
+    await this.publish(frames, scopes, body.reason ?? 'pause', error)
   }
 
   async readScopes(dap, frameId) {
@@ -505,9 +544,9 @@ class Debug extends Base {
     for (const dap of [this.root, ...this.children]) if (!dap.closed) await this.sendBreakpoints(dap)
   }
 
-  async evaluate(expression) {
+  async evaluate(expression, context = 'repl') {
     const dap = this.active
-    const answer = await dap.request('evaluate', { expression, frameId: this.topFrameId ?? undefined, context: 'repl' })
+    const answer = await dap.request('evaluate', { expression, frameId: this.topFrameId ?? undefined, context })
     return { result: answer.result, type: answer.type ?? '', ref: answer.variablesReference ?? 0 }
   }
 
@@ -657,7 +696,7 @@ class NodeDebug extends Base {
     // line before a return would show nothing: work out what it will set now,
     // before the pause is announced and a step can resume the program.
     const guess = top && frames[0] ? await this.predict(top.callFrameId, frames[0].file, frames[0].line).catch(() => null) : null
-    this.publish(frames, scopes, reason, error)
+    await this.publish(frames, scopes, reason, error)
     this.predicted = guess
   }
 
@@ -1092,7 +1131,7 @@ class PhpDebug extends Base {
     }
     // WP-CLI's eval-file runs the file inside its own method: name the frame by the file.
     for (const f of frames) if (/^eval$|eval_file|WP_CLI|wp-cli/i.test(f.name) && f.file === state.program) f.name = '(top level)'
-    this.publish(frames, [{ name: 'Locals', vars: locals }], error ? 'exception' : doc.attrs.reason === 'ok' ? (this.lastStep ?? 'breakpoint') : doc.attrs.reason, error)
+    await this.publish(frames, [{ name: 'Locals', vars: locals }], error ? 'exception' : doc.attrs.reason === 'ok' ? (this.lastStep ?? 'breakpoint') : doc.attrs.reason, error)
   }
 
   toVar(name, prop, depth) {
@@ -1352,6 +1391,7 @@ const commands = {
     Object.assign(state, {
       status: 'starting', lang, program, cwd: config.cwd, args: config.args,
       stop: null, frames: [], scopes: [], lineValues: {}, output: [], exitCode: null, error: null, steps: 0,
+      watches: state.watches.map(({ expr }) => ({ expr, name: expr, value: '', type: '', ref: 0 })),
     })
     emit()
     const backend = LANGS[lang].backend
@@ -1392,7 +1432,38 @@ const commands = {
     await commands.setBreakpoints({ file, lines })
   },
   async evaluate(input) { return need().evaluate(String(input.expression ?? input.expr ?? '')) },
+  async addWatch(input) {
+    const expr = String(input.expr ?? '').trim()
+    if (!expr) throw new Error('addWatch needs "expr"')
+    if (!state.watches.some(w => w.expr === expr)) state.watches.push({ expr, name: expr, value: '', type: '', ref: 0 })
+    await refresh()
+  },
+  async removeWatch(input) {
+    state.watches = state.watches.filter(w => w.expr !== input.expr)
+    state.expanded = state.expanded.filter(key => !key.startsWith(pathKey(['Watch', input.expr]).slice(0, -1)))
+    emit()
+  },
+  // path: the names from the scope (or "Watch") down to the row.
+  async toggleExpand(input) {
+    const key = pathKey(input.path ?? [])
+    const isOpen = state.expanded.includes(key)
+    // Closing a row closes what was open under it too.
+    state.expanded = isOpen ? state.expanded.filter(k => k !== key && !k.startsWith(key.slice(0, -1) + ',')) : [...state.expanded, key]
+    await refresh()
+  },
+  // What a reloaded mod had: its watches and open rows.
+  async restore(input) {
+    for (const expr of input.watches ?? []) if (!state.watches.some(w => w.expr === expr)) state.watches.push({ expr, name: expr, value: '', type: '', ref: 0 })
+    state.expanded = [...new Set([...state.expanded, ...(input.expanded ?? [])])]
+    await refresh()
+  },
   async expand(input) { return { vars: await need().expand(Number(input.ref)) } },
+}
+
+// While paused, reads the open rows and the watches again for the current stop.
+async function refresh() {
+  if (session && state.status === 'paused') await session.decorate(state.scopes)
+  emit()
 }
 
 function need() {
