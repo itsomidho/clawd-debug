@@ -534,7 +534,7 @@ class Debug extends Base {
 const CDP_STEPS = { next: 'Debugger.stepOver', stepIn: 'Debugger.stepInto', stepOut: 'Debugger.stepOut', continue: 'Debugger.resume' }
 // The names Node's module wrapper adds to every file's top level.
 const NODE_WRAPPER = /^(require|module|exports|__filename|__dirname)$/
-const NODE_NOISE = /^(Debugger listening on|For help, see|Debugger attached|Waiting for the debugger to disconnect)/
+const NODE_NOISE = /^(Debugger listening on|For help, see|Debugger attached|Debugger ending on|Waiting for the debugger to disconnect)/
 
 class NodeDebug extends Base {
   constructor(lang) {
@@ -904,8 +904,9 @@ class PhpDebug extends Base {
         ? ['docker', 'exec', ...env, '-w', cwd, target.container, 'php', remote, ...config.args]
         : isLibrary
           ? [...wp, 'eval', 'echo "WordPress loaded.\\n";']
-          : [...wp, 'eval-file', remote, ...config.args]
-      if (target.wpRoot && !isLibrary) this.useEvalFile(config.program)
+          : [...wp, 'eval-file', ...(target.canInclude ? ['--use-include'] : []), remote, ...config.args]
+      // Older WP-CLI evals the file's text (dbgp://N for Xdebug): map it back.
+      if (target.wpRoot && !isLibrary && !target.canInclude) this.useEvalFile(config.program)
     } else {
       argv = ['php', '-d', 'xdebug.mode=debug', '-d', 'xdebug.start_with_request=yes', '-d', `xdebug.client_host=${target.host}`, '-d', `xdebug.client_port=${target.port}`, config.program, ...config.args]
     }
@@ -1226,6 +1227,12 @@ async function phpTarget(program) {
       const up = path.dirname(dir)
       if (up === dir) break
       dir = up
+    }
+    // A WP-CLI that can include the file (not eval its text) keeps its real
+    // name and lines, so breakpoints in a harness stop too.
+    if (best.wpRoot) {
+      const help = await host('docker', ['exec', '-e', 'PAGER=cat', best.container, 'wp', '--allow-root', `--path=${best.wpRoot}`, 'help', 'eval-file']).catch(() => '')
+      best.canInclude = help.includes('--use-include')
     }
     return { ...best, host: info.host, port: info.port }
   }

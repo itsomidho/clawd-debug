@@ -45,6 +45,15 @@ Claude's test scripts go in `.clawd-debug/` in your project; Claude adds that fo
 
 A small helper process (`helper/dapd.mjs`) talks to each language's debugger: DAP for Python, the V8 inspector for Node, DBGp for Xdebug. It runs debuggers without a terminal, so they cannot take your terminal from Claude Code. The mod draws the pane and gives Claude four tools: `debug_start`, `debug_step`, `debug_state` and `debug_breakpoints`.
 
+## Development
+
+```
+node --test 'helper/test/*.test.mjs'
+claude plugin test .
+```
+
+The first runs the helper against real debuggers: Node always, Python when debugpy is installed (`/dbg setup`). Set `CLAWD_DEBUG_PHP_DIR` to a folder a running Docker container with Xdebug serves (a WordPress site adds the WordPress tests) to run the PHP ones too; they copy their files into `<folder>/.clawd-debug/` and remove them after. The second tests the pane and Claude's tools.
+
 ## Install
 
 At the prompt of a terminal session:
