@@ -108,7 +108,7 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
-      <Text wrap="truncate-end" bold color={STATUS_COLOR[props.status]}>
+      <Text wrap="truncate-end" bold color={props.error ? 'red' : STATUS_COLOR[props.status]}>
         {headline(props)}
       </Text>
       {props.note
@@ -150,7 +150,9 @@ const STATUS_COLOR: Record<string, string> = {
 function headline(props: ViewProps): string {
   const name = props.file.split('/').pop() ?? ''
   switch (props.status) {
-    case 'paused': return `⏸ ${name}:${props.current} in ${props.frame} (${props.reason}) · step ${props.steps}`
+    case 'paused': return props.error
+      ? `✖ ${name}:${props.current} · ${props.error}`
+      : `⏸ ${name}:${props.current} in ${props.frame} (${props.reason}) · step ${props.steps}`
     case 'running': return `▶ running ${name}…`
     case 'starting': return `… starting ${name}`
     case 'ended': return `■ ended ${name}${props.note ? '' : ''} · r to run again`
@@ -203,6 +205,11 @@ function lowerPanel(props: ViewProps, tab: Tab, cursor: number, width: number): 
   }
   if (tab === 'vars') {
     // The line under the cursor, whole, and what it set.
+    // The error the program stopped on, whole: the headline cuts it at the edge.
+    if (props.error) {
+      add('Error', { bold: true, color: 'red' })
+      add(`  ${props.error}`, { color: 'red' }, 4)
+    }
     const code = (props.lines[cursor - props.firstLine] ?? '').replace(/\t/g, '    ').trim()
     const values = props.values[String(cursor)]
     if (code || values) {

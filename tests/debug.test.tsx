@@ -129,3 +129,18 @@ test('every key hint shows, wrapped to the width, and ? hides them', async ($, o
   expect(await ui.find({ type: 'Text', text: ' keys   ', in: 'view' })).toBeDefined()
   await ui.unmount()
 })
+
+test('stopped on an error: the headline and the details show it, and Claude reads it', async ($, on) => {
+  const error = "KeyError: 'missing'"
+  engine(on, [], { ...PAUSED, stop: { ...PAUSED.stop, reason: 'exception', error } })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount(PANE)
+  const headline = await ui.find({ type: 'Text', text: /✖ calc\.py:4 · KeyError: 'missing'/, in: 'view' })
+  expect(headline?.props.color).toBe('red')
+  expect(await ui.find({ type: 'Text', text: /^ {2}KeyError: 'missing'$/, in: 'view' })).toBeDefined()
+  await ui.unmount()
+
+  const out = await $.tool.call({ tool: 'mcp__clawd-debug__debug_state' } as any)
+  expect(String((out as { result?: unknown }).result)).toContain(`Stopped on an uncaught error: ${error}`)
+})

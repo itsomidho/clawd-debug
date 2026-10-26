@@ -283,6 +283,7 @@ async function viewProps($: EngineInterface): Promise<ViewProps> {
     breakpoints: (st.breakpoints[file] ?? []).map(b => b.line),
     values: st.lineValues[file] ?? {},
     reason: st.stop?.reason ?? '',
+    error: st.status === 'paused' ? st.stop?.error ?? '' : '',
     frame: st.stop?.frame ?? '',
     steps: st.steps,
     scopes: st.scopes.map(s => ({ name: s.name, vars: s.vars.slice(0, 60).map(v => ({ name: v.name, value: v.value })) })),
@@ -298,6 +299,7 @@ async function summary($: EngineInterface, st: DebugState, context = 3): Promise
   const name = (f?: string | null) => (f ?? '').split('/').pop()
   if (st.status === 'paused' && st.stop?.file) {
     out.push(`Paused at ${name(st.stop.file)}:${st.stop.line} in ${st.stop.frame} (${st.stop.reason}), step ${st.steps}.`)
+    if (st.stop.error) out.push(`Stopped on an uncaught error: ${st.stop.error}`)
     const lines = await loadSource($, st.stop.file)
     const at = st.stop.line ?? 1
     for (let n = Math.max(1, at - context); n <= Math.min(lines.length, at + context); n++) {

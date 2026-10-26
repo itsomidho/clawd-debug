@@ -11,6 +11,8 @@ Works with **Python**, **JavaScript (Node)** and **PHP**, including PHP inside a
 3. Press `t`: Claude writes a small script that calls the code with realistic test data, then starts the run. Or press `r` to run the file as it is.
 4. Step with the keys below and watch the values.
 
+When the code throws an error nobody catches, the run stops on the failing line with its variables, and the error shows in red. A line run more than once (a loop) shows each value it set: `price = 20 → 5.5 (×2)`.
+
 You can also just ask Claude: "debug `calc_total` with test data", "run `register()` with an empty option".
 
 With [clawd-git](https://github.com/itsomidho/clawd-git) 0.4.4 or later, a ▷ on a file's row (and **Debug** on its diff) opens the file here.
@@ -35,7 +37,7 @@ With [clawd-git](https://github.com/itsomidho/clawd-git) 0.4.4 or later, a ▷ o
 |---|---|
 | Python | [debugpy](https://github.com/microsoft/debugpy): run `/dbg setup` once (it installs into `~/.cache/clawd-debug/python`) |
 | Node | nothing: Node's built-in inspector |
-| PHP | Xdebug 3 with `xdebug.mode=debug`. A file inside a running Docker container's bind mount runs there (the container is found by its mounts); inside a WordPress install it runs with `wp eval-file`, so WordPress is loaded. Otherwise the local `php` with Xdebug. |
+| PHP | Xdebug 3 with `xdebug.mode=debug`. A file inside a running Docker container's bind mount runs there (the container is found by its mounts); inside a WordPress install it runs with `wp eval-file`, so WordPress is loaded. A plugin or theme file is not run itself: `r` loads WordPress, so its breakpoints in code that runs on load stop. Stepping into WordPress core or `vendor/` steps back out (what it returned shows on your line). Otherwise the local `php` with Xdebug. |
 
 Claude's test scripts go in `.clawd-debug/` in your project; Claude adds that folder to `.git/info/exclude` so it is never committed.
 

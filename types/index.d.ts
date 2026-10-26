@@ -17,7 +17,8 @@ export type DebugState = {
   cwd: string | null
   args: string[]
   breakpoints: Record<string, Breakpoint[]>
-  stop: { reason: string; file?: string; line?: number; frame?: string } | null
+  // error: the uncaught error it stopped on, when reason is 'exception'.
+  stop: { reason: string; file?: string; line?: number; frame?: string; error?: string } | null
   frames: Frame[]
   scopes: Scope[]
   // file -> line -> what that line set ({ name: value })
@@ -45,6 +46,8 @@ export type ViewProps = {
   frames: Frame[]
   output: string[]
   note: string
+  // The uncaught error the program stopped on, '' for none.
+  error: string
 }
 
 // What the view posts back: a key the person pressed, as a command.

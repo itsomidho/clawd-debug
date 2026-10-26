@@ -24,6 +24,9 @@ const argv = parseArgs(process.argv.slice(2))
 const SOCKET = argv.socket ?? path.join(os.tmpdir(), `clawd-debug-${process.pid}.sock`)
 const CACHE = argv.cache ?? path.join(os.homedir(), '.cache', 'clawd-debug')
 const MAX_OUTPUT = 300
+const MAX_OUTPUT_CHARS = 40_000
+// How often the state goes to the mod at most: each one is a write and a redraw.
+const EMIT_MS = 100
 const MAX_VARS = 80
 
 // ---------------------------------------------------------------- state
@@ -48,7 +51,23 @@ const state = {
 let session = null // the running Debug, if any
 const waiters = new Set()
 
+// Sends the state at most every EMIT_MS: a chatty program printing thousands
+// of lines would otherwise send it thousands of times. The last change always
+// goes out, at the latest EMIT_MS after it.
+let emitTimer = null
+let isDirty = false
+
 function emit() {
+  if (emitTimer) { isDirty = true; return }
+  send()
+  emitTimer = setTimeout(() => {
+    emitTimer = null
+    if (isDirty) emit()
+  }, EMIT_MS)
+}
+
+function send() {
+  isDirty = false
   process.stdout.write(JSON.stringify({ type: 'state', state }) + '\n')
 }
 
@@ -67,8 +86,11 @@ function waitForSettle(ms) {
 
 function addOutput(category, text) {
   if (!text) return
-  state.output.push({ category, text })
+  state.output.push({ category, text: text.length > MAX_OUTPUT_CHARS ? `…${text.slice(-MAX_OUTPUT_CHARS)}` : text })
   if (state.output.length > MAX_OUTPUT) state.output.splice(0, state.output.length - MAX_OUTPUT)
+  // Keep the newest MAX_OUTPUT_CHARS characters in all.
+  let total = state.output.reduce((n, o) => n + o.text.length, 0)
+  while (total > MAX_OUTPUT_CHARS && state.output.length > 1) total -= state.output.shift().text.length
 }
 
 // ---------------------------------------------------------------- DAP wire
@@ -235,12 +257,14 @@ class Base {
     this.ended = false
   }
 
-  publish(frames, scopes, reason) {
+  // error: the uncaught error it stopped on ("KeyError: 'missing'"), if any.
+  publish(frames, scopes, reason, error) {
     const top = frames[0]
     this.recordLineValues(frames, scopes)
     state.status = 'paused'
     state.steps += 1
     state.stop = top ? { reason, file: top.file, line: top.line, frame: top.name } : { reason }
+    if (error) state.stop.error = clip(error)
     state.frames = frames.map(({ name, file, line }) => ({ name, file, line }))
     state.scopes = scopes
     emit()
@@ -362,6 +386,8 @@ class Debug extends Base {
     launched.catch(error => fail(error))
     await initialized
     await this.sendBreakpoints(dap)
+    // Stop on an uncaught error, with its variables, instead of ending the run.
+    await dap.request('setExceptionBreakpoints', { filters: ['uncaught'] }).catch(() => {})
     await dap.request('configurationDone').catch(() => {})
     return launched
   }
@@ -417,7 +443,12 @@ class Debug extends Base {
     const top = frames[0]
     this.topFrameId = top?.id ?? null
     const scopes = top ? await this.readScopes(dap, top.id) : []
-    this.publish(frames, scopes, body.reason ?? 'pause')
+    let error
+    if (body.reason === 'exception') {
+      const info = await dap.request('exceptionInfo', { threadId }).catch(() => null)
+      error = info ? [info.exceptionId, info.description].filter(Boolean).join(': ') : body.text || body.description || 'exception'
+    }
+    this.publish(frames, scopes, body.reason ?? 'pause', error)
   }
 
   async readScopes(dap, frameId) {
@@ -552,6 +583,8 @@ class NodeDebug extends Base {
     await this.call('Runtime.enable')
     await this.call('Debugger.enable')
     await this.call('Debugger.setBlackboxPatterns', { patterns: ['^node:', 'node:internal', '/node_modules/'] }).catch(() => {})
+    // Stop on an uncaught error, with its variables, instead of ending the run.
+    await this.call('Debugger.setPauseOnExceptions', { state: 'uncaught' }).catch(() => {})
     await this.updateBreakpoints()
     await this.call('Runtime.runIfWaitingForDebugger')
   }
@@ -617,12 +650,14 @@ class NodeDebug extends Base {
     const top = params.callFrames[0]
     this.callFrameId = top?.callFrameId ?? null
     const scopes = top ? await this.readScopes(top) : []
-    const reason = params.reason === 'other' ? (params.hitBreakpoints?.length ? 'breakpoint' : 'step') : params.reason
+    const isError = params.reason === 'exception' || params.reason === 'promiseRejection'
+    const reason = params.reason === 'other' ? (params.hitBreakpoints?.length ? 'breakpoint' : 'step') : isError ? 'exception' : params.reason
+    const error = isError ? (params.data?.description ?? params.data?.value ?? 'exception').toString().split('\n')[0] : undefined
     // Node leaves a function's block scope before its return stop, so the
     // line before a return would show nothing: work out what it will set now,
     // before the pause is announced and a step can resume the program.
     const guess = top && frames[0] ? await this.predict(top.callFrameId, frames[0].file, frames[0].line).catch(() => null) : null
-    this.publish(frames, scopes, reason)
+    this.publish(frames, scopes, reason, error)
     this.predicted = guess
   }
 
@@ -793,14 +828,32 @@ function escapeRe(text) {
   return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
 }
 
+// Every value a line set, per name: a loop's line shows them all, not the last.
+const history = new Map() // `${file}:${line}:${name}` -> { values: string[], count }
+const HISTORY = 4
+
 function pin(file, line, values, isArgs = false) {
   if (!file || !line) return
   const forFile = (state.lineValues[file] ??= {})
   const at = (forFile[line] ??= {})
   for (const [name, value] of Object.entries(values)) {
-    if (isArgs && name in at) continue
-    at[name] = value
+    const key = `${file}:${line}:${name}`
+    const seen = history.get(key) ?? { values: [], count: 0 }
+    // The arguments are pinned at each call; the same value again adds nothing.
+    if (isArgs && seen.values.at(-1) === value) continue
+    seen.count += 1
+    seen.values.push(value)
+    if (seen.values.length > HISTORY) seen.values.shift()
+    history.set(key, seen)
+    at[name] = showHistory(seen)
   }
+}
+
+// "5.5", or "10 → 20 → 25.5 (×3)", or "… → 70 → 80 (×8)" past HISTORY values.
+function showHistory({ values, count }) {
+  if (count === 1) return values[0] ?? ''
+  const shown = values.join(' → ')
+  return clip(`${count > values.length ? '… → ' : ''}${shown} (×${count})`)
 }
 
 function isUserGlobal(v) {
@@ -841,9 +894,18 @@ class PhpDebug extends Base {
     let argv
     if (target.container) {
       const cwd = this.toRemote(config.cwd && config.cwd.startsWith(target.hostRoot) ? config.cwd : path.dirname(config.program))
-      argv = target.wpRoot
-        ? ['docker', 'exec', ...env, '-w', cwd, target.container, 'wp', '--allow-root', `--path=${target.wpRoot}`, 'eval-file', remote, ...config.args]
-        : ['docker', 'exec', ...env, '-w', cwd, target.container, 'php', remote, ...config.args]
+      // A plugin or theme file is not a script: running it would declare its
+      // classes twice and crash WordPress. Load WordPress instead, so its
+      // breakpoints in code that runs on load stop; a function needs a harness (t).
+      const isLibrary = target.wpRoot && !/\/\.clawd-debug\//.test(config.program) && /\/wp-content\//.test(config.program)
+      if (isLibrary) addOutput('clawd-debug', 'This file is part of WordPress (a plugin or theme), so only WordPress is loaded: breakpoints in code that runs on load stop. To run one of its functions with test data, press t.\n')
+      const wp = ['docker', 'exec', ...env, '-w', cwd, target.container, 'wp', '--allow-root', `--path=${target.wpRoot}`]
+      argv = !target.wpRoot
+        ? ['docker', 'exec', ...env, '-w', cwd, target.container, 'php', remote, ...config.args]
+        : isLibrary
+          ? [...wp, 'eval', 'echo "WordPress loaded.\\n";']
+          : [...wp, 'eval-file', remote, ...config.args]
+      if (target.wpRoot && !isLibrary) this.useEvalFile(config.program)
     } else {
       argv = ['php', '-d', 'xdebug.mode=debug', '-d', 'xdebug.start_with_request=yes', '-d', `xdebug.client_host=${target.host}`, '-d', `xdebug.client_port=${target.port}`, config.program, ...config.args]
     }
@@ -874,7 +936,37 @@ class PhpDebug extends Base {
       await this.cmd(`feature_set -n ${name} -v ${value}`).catch(() => {})
     }
     await this.updateBreakpoints()
+    // Stop on an error, with its variables. Xdebug matches exception names
+    // exactly (not subclasses), so "*": the PHP warnings and notices it also
+    // stops on go on by themselves (see paused).
+    await this.cmd('breakpoint_set -t exception -x *').catch(() => {})
     this.go('run')
+  }
+
+  // WP-CLI's eval-file runs a file's text through eval(): Xdebug names that
+  // code dbgp://N, and its lines may start further down than the file's
+  // (versions differ in what they cut). Both are mapped back to the file.
+  useEvalFile(file) {
+    this.evalFile = file
+    this.evalOffsets = new Map() // dbgp://N -> how many lines the eval'd code starts below the file's first
+  }
+
+  // Finds where the code Xdebug ran as `uri` starts in the file, by its text.
+  async learnOffset(uri) {
+    if (!this.evalFile || !uri?.startsWith('dbgp://') || this.evalOffsets.has(uri)) return
+    this.evalOffsets.set(uri, 0)
+    const doc = await this.cmd(`source -f ${uri}`).catch(() => null)
+    const raw = doc ? textOf(doc) : ''
+    const code = (doc?.attrs.encoding === 'base64' ? Buffer.from(raw, 'base64').toString('utf8') : raw).split('\n')
+    const lines = fs.readFileSync(this.evalFile, 'utf8').split('\n')
+    const head = code.slice(0, 3).map(l => l.trim())
+    for (let k = 0; k < Math.min(lines.length, 20); k++) {
+      if (head.every((l, i) => (lines[k + i] ?? '').trim().endsWith(l))) { this.evalOffsets.set(uri, k); return }
+    }
+  }
+
+  hostLine(uri, line) {
+    return uri?.startsWith('dbgp://') && this.evalFile ? line + (this.evalOffsets.get(uri) ?? 0) : line
   }
 
   attach(sock) {
@@ -937,16 +1029,53 @@ class PhpDebug extends Base {
   }
 
   async paused(doc) {
+    const message = find(doc, 'xdebug:message')
+    // A step's answer may not name the file: the top of the stack does.
     const stack = await this.cmd('stack_get')
+    for (const f of children(stack, 'stack')) await this.learnOffset(f.attrs.filename)
+    const topFrame = children(stack, 'stack')[0]
+    const where = this.toHost(message?.attrs.filename || topFrame?.attrs.filename || '')
+    // Where PHP really is: a step out stops at the callee's return, so the
+    // stack's top can still be in the callee while the message names the caller.
+    const inside = this.toHost(topFrame?.attrs.filename || message?.attrs.filename || '')
+    const kind = message?.attrs.exception ?? ''
+    // A PHP warning or notice is not an error to stop on: go on. Nor is the
+    // "Fatal error" that follows an uncaught exception it already stopped on.
+    if (kind && /^(warning|notice|deprecated|strict standards|user (warning|notice|deprecated)|xdebug)$/i.test(kind)) { this.go('run'); return }
+    if (/^fatal error$/i.test(kind) && this.stoppedOnError) { this.go('run'); return }
+    // Like Python's and Node's "my code only": a step into WordPress core or a
+    // vendor library steps back out, and an error raised (and maybe caught)
+    // there goes on. A breakpoint set there still stops.
+    // Xdebug marks a stop on an exception breakpoint by the message's
+    // `exception` attribute (its reason can still read "ok").
+    const isError = doc.attrs.reason === 'exception' || Boolean(message?.attrs.exception)
+    if (isError && where && isNotOwnCode(where, this.target)) { this.go('run'); return }
+    if (this.lastStep === 'step' && inside && isNotOwnCode(inside, this.target) && (this.skips ?? 0) < 30) {
+      this.skips = (this.skips ?? 0) + 1
+      // At the skipped function's return: keep what it returned on the line
+      // that called it, then go on to the caller's next stop.
+      const returned = find(doc, 'xdebug:return_value')
+      const value = returned && find(returned, 'property')
+      if (value && message && !isNotOwnCode(where, this.target)) {
+        pin(where, this.hostLine(message.attrs.filename, Number(message.attrs.lineno)), { [`↩ ${topFrame?.attrs.where ?? 'return'}`]: clip(phpValue(value)) })
+      }
+      this.go(value ? 'step_over' : 'step_out')
+      return
+    }
+    this.skips = 0
+    this.stoppedOnError = isError
+    const error = isError && message
+      ? [message.attrs.exception, textOf(message)].filter(Boolean).join(': ')
+      : undefined
     const frames = children(stack, 'stack').map(f => ({
       name: f.attrs.where === '{main}' ? '(top level)' : f.attrs.where,
       file: this.toHost(f.attrs.filename),
-      line: Number(f.attrs.lineno),
+      line: this.hostLine(f.attrs.filename, Number(f.attrs.lineno)),
       level: Number(f.attrs.level),
     })).filter(f => !f.file.startsWith('dbgp:'))
-    // Frames in files this machine does not have (WP-CLI's phar and launcher,
-    // the container's own PHP) say nothing about the code: keep the top one only.
-    const own = frames.filter((f, i) => i === 0 || fs.existsSync(f.file))
+    // Frames outside the project (WP-CLI's phar and launcher, the container's
+    // own PHP, WordPress core, vendor) say little about the code: keep the top one only.
+    const own = frames.filter((f, i) => i === 0 || !isNotOwnCode(f.file, this.target))
     frames.splice(0, frames.length, ...own)
     this.refs.clear()
     const locals = []
@@ -961,8 +1090,8 @@ class PhpDebug extends Base {
       locals.push(this.toVar(prop.attrs.name, prop, 0))
     }
     // WP-CLI's eval-file runs the file inside its own method: name the frame by the file.
-    for (const f of frames) if (/eval_file|WP_CLI|wp-cli/i.test(f.name) && f.file === state.program) f.name = '(top level)'
-    this.publish(frames, [{ name: 'Locals', vars: locals }], doc.attrs.reason === 'ok' ? (this.lastStep ?? 'breakpoint') : doc.attrs.reason)
+    for (const f of frames) if (/^eval$|eval_file|WP_CLI|wp-cli/i.test(f.name) && f.file === state.program) f.name = '(top level)'
+    this.publish(frames, [{ name: 'Locals', vars: locals }], error ? 'exception' : doc.attrs.reason === 'ok' ? (this.lastStep ?? 'breakpoint') : doc.attrs.reason, error)
   }
 
   toVar(name, prop, depth) {
@@ -1047,11 +1176,27 @@ class PhpDebug extends Base {
   }
 
   toHost(uri) {
+    if (uri.startsWith('dbgp://') && this.evalFile) return this.evalFile
     let file = uri.startsWith('file://') ? decodeURIComponent(uri.slice(7)) : uri
     const t = this.target
     if (t?.container && file.startsWith(t.remoteRoot)) file = t.hostRoot + file.slice(t.remoteRoot.length)
     return file
   }
+}
+
+// WordPress core, a vendor library, WP-CLI's phar or a file this machine
+// does not have: code the person did not write, which a step skips.
+function isNotOwnCode(file, target) {
+  if (!file || file.startsWith('phar:') || !fs.existsSync(file)) return true
+  if (/\/vendor\//.test(file)) return true
+  // In a container, only files under its bind mount are the project's.
+  if (target?.container && !file.startsWith(target.hostRoot + '/')) return true
+  if (target?.wpRoot && target.container) {
+    const root = target.hostRoot + target.wpRoot.slice(target.remoteRoot.length)
+    if (file.startsWith(root + '/wp-includes/') || file.startsWith(root + '/wp-admin/')) return true
+    if (path.dirname(file) === root) return true // wp-load.php, wp-settings.php and the like
+  }
+  return false
 }
 
 // Which PHP runs this file: a running container whose bind mount holds it
@@ -1196,6 +1341,7 @@ const commands = {
       }
     }
     sources.clear()
+    history.clear()
     Object.assign(state, {
       status: 'starting', lang, program, cwd: config.cwd, args: config.args,
       stop: null, frames: [], scopes: [], lineValues: {}, output: [], exitCode: null, error: null, steps: 0,
@@ -1252,6 +1398,8 @@ const STEPS = new Set(['start', 'restart', 'next', 'stepIn', 'stepOut', 'continu
 async function run(input) {
   const name = input?.cmd
   if (!commands[name]) throw new Error(`unknown command "${name}"`)
+  // A new run first ends the old one: its end must not answer the new wait.
+  if ((name === 'start' || name === 'restart') && session) await session.stop()
   const settled = input.wait && STEPS.has(name) ? waitForSettle(Number(input.timeoutMs ?? 30000)) : null
   const extra = (await commands[name](input)) ?? {}
   if (settled) await settled
