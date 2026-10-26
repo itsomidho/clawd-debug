@@ -203,6 +203,16 @@ describe('Node', () => {
     assert.deepEqual((await helper.state()).expanded, [])
   })
 
+  test('a conditional breakpoint stops only when its condition is true', async () => {
+    const { state } = await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 5, condition: 'price < 10' }] })
+    assert.equal(state.stop.line, 5)
+    assert.equal(state.scopes[0].vars.find(v => v.name === 'price')?.value, '5.5')
+    assert.equal(state.breakpoints[calc][0].condition, 'price < 10')
+    // An empty condition keeps a plain breakpoint on the line.
+    const plain = await helper.request('POST', '/cmd', { cmd: 'setCondition', file: calc, line: 5, condition: '' })
+    assert.deepEqual(plain.state.breakpoints[calc].map(b => [b.line, b.condition ?? '']), [[5, '']])
+  })
+
   test('a new run started while one is paused answers for the new run', async () => {
     await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 2 }] })
     const { state } = await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 2 }] })
@@ -236,6 +246,14 @@ describe('Python', { skip: !HAS_DEBUGPY && 'debugpy is not installed (/dbg setup
     const { state } = await helper.request('POST', '/cmd', { cmd: 'toggleExpand', path: ['Locals', 'item'] })
     assert.equal(state.watches[0].value, '20')
     assert.deepEqual(state.scopes[0].vars.find(v => v.name === 'item').children.map(c => `${c.name}=${c.value}`).slice(0, 2), ["'price'=10", "'qty'=2"])
+  })
+
+  test('a conditional breakpoint stops only when its condition is true', async () => {
+    await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 5 }] })
+    await helper.request('POST', '/cmd', { cmd: 'setCondition', file: calc, line: 5, condition: 'price < 10' })
+    const { state } = await helper.cmd({ cmd: 'continue' })
+    assert.equal(state.stop.line, 5)
+    assert.equal(state.scopes[0].vars.find(v => v.name === 'price')?.value, '5.5')
   })
 
   test('an uncaught error stops on its line, with the error and the variables', async () => {
@@ -287,6 +305,13 @@ describe('PHP (Xdebug in Docker)', { skip: !PHP_DIR && 'set CLAWD_DEBUG_PHP_DIR 
     assert.equal(state.watches[0].value, '2')
     assert.deepEqual(state.scopes[0].vars.find(v => v.name === '$item').children.map(c => `${c.name}=${c.value}`), ['price=10', 'qty=2'])
     await helper.request('POST', '/cmd', { cmd: 'removeWatch', expr: 'count($items)' })
+  })
+
+  test('a conditional breakpoint stops only when its condition is true', async () => {
+    const lib = at('lib.php')
+    const { state } = await helper.cmd({ cmd: 'start', program: at('check_total.php'), cwd: PHP_DIR, breakpoints: [{ file: lib, line: 8, condition: '$price < 10' }], timeoutMs: 120_000 })
+    assert.equal(state.stop.line, 8)
+    assert.equal(state.scopes[0].vars.find(v => v.name === '$price')?.value, '5.5')
   })
 
   test('a breakpoint in the harness itself stops', async () => {

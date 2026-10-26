@@ -218,3 +218,20 @@ test('d on a selected watch removes it', async ($, on) => {
   expect(sent.at(-1)).toMatchObject({ cmd: 'removeWatch', expr: 'nope' })
   await ui.unmount()
 })
+
+test('B sets a condition on the line; a conditional breakpoint is drawn ◆ with its condition', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent, { ...PAUSED, breakpoints: { [FILE]: [{ line: 2, verified: true }, { line: 4, verified: true, condition: 'item > 1' }] } })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  // The cursor sits on the paused line, 4: its breakpoint is conditional.
+  expect(await ui.find({ type: 'Text', text: '◆', in: 'view' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /◆ stops only when item > 1$/, in: 'view' })).toBeDefined()
+  // B opens the field with the current condition; edit it and set it.
+  await ui.key({ key: 'B', in: 'view' })
+  expect(await ui.find({ type: 'Text', text: 'stop at line 4 when: ', in: 'view' })).toBeDefined()
+  for (const key of ['backspace', '2']) await ui.key({ key, in: 'view' })
+  await ui.key({ key: 'return', in: 'view' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'setCondition', line: 4, condition: 'item > 2' })
+  await ui.unmount()
+})

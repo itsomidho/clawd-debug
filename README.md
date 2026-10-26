@@ -26,6 +26,7 @@ With [clawd-git](https://github.com/itsomidho/clawd-git) 0.4.4 or later, a ▷ o
 | `n` `s` `o` `c` | next line, step into, step out, continue |
 | `r` `q` | run (again), stop |
 | `b` `t` | breakpoint on the cursor's line, test data from Claude |
+| `B` | a breakpoint that stops only when a condition is true (`$price > 100`, `i == 41`), drawn `◆`; `B` again edits it, an empty condition makes it plain |
 | `↑` `↓` | move the cursor; the details show that line whole and what it set |
 | `←` `→` | slide long lines sideways |
 | `J` `K`, `+` `-` | scroll the details, make them bigger or smaller |

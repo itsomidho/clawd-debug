@@ -61,7 +61,7 @@ export const register: Register = on => {
                 // A reload starts a fresh helper: give it the breakpoints the pane still shows.
                 const kept = await read($, dbg)
                 for (const [file, list] of Object.entries(kept.breakpoints)) {
-                  if (list.length) await send($, { cmd: 'setBreakpoints', file, lines: list.map(b => b.line) })
+                  if (list.length) await send($, { cmd: 'setBreakpoints', file, breakpoints: list.map(b => ({ line: b.line, condition: b.condition ?? '' })) })
                 }
                 // ...and its watches and open rows.
                 const watches = (kept.watches ?? []).map(w => w.expr)
@@ -101,6 +101,11 @@ export const register: Register = on => {
     const data = e.data as ViewMessage
     if (!data || typeof data !== 'object' || typeof data.cmd !== 'string') return {}
     const st = await read($, dbg)
+    if (data.cmd === 'setCondition') {
+      const file = st.stop?.file ?? ((await read($, shown)) || st.program || '')
+      if (file && Number.isInteger(data.line)) await send($, { cmd: 'setCondition', file, line: data.line, condition: String(data.condition ?? '') })
+      return {}
+    }
     if (data.cmd === 'toggleBreakpoint') {
       const file = st.stop?.file ?? ((await read($, shown)) || st.program || '')
       if (file && Number.isInteger(data.line)) await send($, { cmd: 'toggleBreakpoint', file, line: data.line })
@@ -170,11 +175,11 @@ export const register: Register = on => {
   // ---------------------------------------------------------------- Claude's tools
 
   on('tool.call', { tool: /^mcp__clawd-debug__debug_start$/ }, async ($, e) => {
-    const input = e as unknown as { program?: string; breakpoints?: { file: string; line: number }[]; args?: string[]; cwd?: string; lang?: string }
+    const input = e as unknown as { program?: string; breakpoints?: { file: string; line: number; condition?: string }[]; args?: string[]; cwd?: string; lang?: string }
     if (!input.program) return { result: 'debug_start needs "program".' }
     const cwd = input.cwd ?? (await $.session.cwd())
     const program = input.program.startsWith('/') ? input.program : `${cwd}/${input.program}`
-    const breakpoints = (input.breakpoints ?? []).map(b => ({ file: b.file.startsWith('/') ? b.file : `${cwd}/${b.file}`, line: Number(b.line) }))
+    const breakpoints = (input.breakpoints ?? []).map(b => ({ file: b.file.startsWith('/') ? b.file : `${cwd}/${b.file}`, line: Number(b.line), ...(b.condition ? { condition: b.condition } : {}) }))
     const real = await realPath($, breakpoints[0]?.file ?? program)
     await update($, shown, () => real)
     await openPane($)
@@ -222,13 +227,15 @@ export const register: Register = on => {
   }).catch(() => ({ result: 'The watch expressions could not be changed.' }))
 
   on('tool.call', { tool: /^mcp__clawd-debug__debug_breakpoints$/ }, async ($, e) => {
-    const input = e as unknown as { file?: string; lines?: number[] }
+    const input = e as unknown as { file?: string; lines?: number[]; conditions?: Record<string, string> }
     if (!input.file) return { result: 'debug_breakpoints needs "file".' }
     const cwd = await $.session.cwd()
-    const file = input.file.startsWith('/') ? input.file : `${cwd}/${input.file}`
-    const answer = await send($, { cmd: 'setBreakpoints', file, lines: input.lines ?? [] })
+    const file = await realPath($, input.file.startsWith('/') ? input.file : `${cwd}/${input.file}`)
+    const conditions = input.conditions ?? {}
+    const answer = await send($, { cmd: 'setBreakpoints', file, breakpoints: (input.lines ?? []).map(line => ({ line, condition: conditions[String(line)] ?? '' })) })
     const set = answer.state?.breakpoints[file] ?? []
-    return { result: answer.ok ? `Breakpoints in ${input.file}: ${set.map(b => b.line + (b.verified ? '' : ' (pending)')).join(', ') || 'none'}` : `Not set: ${answer.error}` }
+    const shown = set.map(b => `${b.line}${b.condition ? ` (when ${b.condition})` : ''}${b.verified ? '' : ' (pending)'}`)
+    return { result: answer.ok ? `Breakpoints in ${input.file}: ${shown.join(', ') || 'none'}` : `Not set: ${answer.error}` }
   }).catch(() => ({ result: 'The breakpoints could not be set.' }))
 }
 
@@ -304,6 +311,7 @@ async function viewProps($: EngineInterface): Promise<ViewProps> {
     firstLine,
     current,
     breakpoints: (st.breakpoints[file] ?? []).map(b => b.line),
+    conditions: Object.fromEntries((st.breakpoints[file] ?? []).filter(b => b.condition).map(b => [String(b.line), b.condition ?? ''])),
     values: st.lineValues[file] ?? {},
     reason: st.stop?.reason ?? '',
     error: st.status === 'paused' ? st.stop?.error ?? '' : '',
@@ -409,7 +417,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         program: { type: 'string', description: 'The file to run (absolute, or relative to the session folder).' },
-        breakpoints: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' } }, required: ['file', 'line'] }, description: 'Where to stop: file and 1-based line.' },
+        breakpoints: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, condition: { type: 'string', description: 'Stop only when this expression (in the program\'s language) is true.' } }, required: ['file', 'line'] }, description: 'Where to stop: file and 1-based line, and optionally a condition.' },
         args: { type: 'array', items: { type: 'string' }, description: 'Command-line arguments for the program.' },
         cwd: { type: 'string', description: 'Working folder; default the session folder.' },
         lang: { type: 'string', enum: ['python', 'node', 'php'], description: 'Default: from the file extension.' },
@@ -453,12 +461,13 @@ const TOOLS = [
   },
   {
     name: 'debug_breakpoints',
-    description: 'Replace the breakpoints of one file in the clawd-debug run (an empty list clears them). Works before or during a run.',
+    description: 'Replace the breakpoints of one file in the clawd-debug run (an empty list clears them). Works before or during a run. "conditions" makes a line stop only when its expression is true, e.g. { "42": "$price > 100" }.',
     inputSchema: {
       type: 'object',
       properties: {
         file: { type: 'string' },
         lines: { type: 'array', items: { type: 'number' } },
+        conditions: { type: 'object', additionalProperties: { type: 'string' }, description: 'line number -> condition, for the lines that should stop only when it is true' },
       },
       required: ['file', 'lines'],
     },

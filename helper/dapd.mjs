@@ -37,7 +37,7 @@ const state = {
   program: null,
   cwd: null,
   args: [],
-  breakpoints: {}, // file -> [{ line, verified }]
+  breakpoints: {}, // file -> [{ line, verified, condition? }]: a condition makes it stop only when true
   stop: null, // { reason, file, line, frame }
   frames: [], // [{ name, file, line }]
   scopes: [], // [{ name, vars: [{ name, value, type, ref }] }]
@@ -528,13 +528,14 @@ class Debug extends Base {
     for (const [file, list] of Object.entries(state.breakpoints)) {
       const answer = await dap.request('setBreakpoints', {
         source: { path: file, name: path.basename(file) },
-        breakpoints: list.map(b => ({ line: b.line })),
+        breakpoints: list.map(b => ({ line: b.line, ...(b.condition ? { condition: b.condition } : {}) })),
         lines: list.map(b => b.line),
       }).catch(() => null)
       if (answer?.breakpoints) {
         state.breakpoints[file] = list.map((b, i) => ({
           line: answer.breakpoints[i]?.line ?? b.line,
           verified: answer.breakpoints[i]?.verified ?? false,
+          ...(b.condition ? { condition: b.condition } : {}),
         }))
       }
     }
@@ -777,10 +778,10 @@ class NodeDebug extends Base {
       const urlRegex = `^(${escapeRe(file)}|${escapeRe(pathToUrl(file))})$`
       state.breakpoints[file] = []
       for (const b of list) {
-        const answer = await this.call('Debugger.setBreakpointByUrl', { lineNumber: b.line - 1, urlRegex }).catch(() => null)
+        const answer = await this.call('Debugger.setBreakpointByUrl', { lineNumber: b.line - 1, urlRegex, condition: b.condition ?? '' }).catch(() => null)
         if (answer?.breakpointId) this.bpIds.push(answer.breakpointId)
         const at = answer?.locations?.[0]
-        state.breakpoints[file].push({ line: at ? at.lineNumber + 1 : b.line, verified: Boolean(at) })
+        state.breakpoints[file].push({ line: at ? at.lineNumber + 1 : b.line, verified: Boolean(at), ...(b.condition ? { condition: b.condition } : {}) })
       }
     }
   }
@@ -1164,10 +1165,13 @@ class PhpDebug extends Base {
       const uri = 'file://' + this.toRemote(file)
       state.breakpoints[file] = []
       for (const b of list) {
-        const doc = await this.cmd(`breakpoint_set -t line -f ${uri} -n ${b.line}`).catch(() => null)
+        // A condition goes as the command's data: Xdebug stops only when it is true.
+        const doc = await (b.condition
+          ? this.cmd(`breakpoint_set -t conditional -f ${uri} -n ${b.line}`, b.condition)
+          : this.cmd(`breakpoint_set -t line -f ${uri} -n ${b.line}`)).catch(() => null)
         if (doc?.attrs.id) this.bpIds.push(doc.attrs.id)
         const resolved = find(doc ?? { children: [] }, 'breakpoint')
-        state.breakpoints[file].push({ line: resolved ? Number(resolved.attrs.lineno) || b.line : b.line, verified: Boolean(doc?.attrs.id) })
+        state.breakpoints[file].push({ line: resolved ? Number(resolved.attrs.lineno) || b.line : b.line, verified: Boolean(doc?.attrs.id), ...(b.condition ? { condition: b.condition } : {}) })
       }
     }
   }
@@ -1383,7 +1387,8 @@ const commands = {
       state.breakpoints = {}
       for (const bp of input.breakpoints) {
         const file = realpath(path.resolve(config.cwd, bp.file))
-        ;(state.breakpoints[file] ??= []).push({ line: Number(bp.line), verified: false })
+        const condition = bp.condition ? String(bp.condition).trim() : ''
+        ;(state.breakpoints[file] ??= []).push({ line: Number(bp.line), verified: false, ...(condition ? { condition } : {}) })
       }
     }
     sources.clear()
@@ -1416,10 +1421,19 @@ const commands = {
   stepOut: () => need().step('stepOut'),
   continue: () => need().step('continue'),
   pause: () => need().pause(),
+  // `lines` (each keeps the condition it had), or `breakpoints`: [{ line, condition }]
+  // where a condition given ('' for none) replaces the old one.
   async setBreakpoints(input) {
     const file = realpath(path.resolve(state.cwd ?? process.cwd(), input.file))
-    const lines = [...new Set((input.lines ?? []).map(Number))].sort((a, b) => a - b)
-    if (lines.length) state.breakpoints[file] = lines.map(line => ({ line, verified: false }))
+    const had = new Map((state.breakpoints[file] ?? []).map(b => [b.line, b.condition ?? '']))
+    const given = input.breakpoints ?? (input.lines ?? []).map(line => ({ line }))
+    const byLine = new Map()
+    for (const b of given) {
+      const line = Number(b.line)
+      if (Number.isInteger(line) && line > 0) byLine.set(line, b.condition !== undefined ? String(b.condition).trim() : had.get(line) ?? '')
+    }
+    const list = [...byLine].sort((a, b) => a[0] - b[0]).map(([line, condition]) => ({ line, verified: false, ...(condition ? { condition } : {}) }))
+    if (list.length) state.breakpoints[file] = list
     else delete state.breakpoints[file]
     if (session) await session.updateBreakpoints()
     emit()
@@ -1430,6 +1444,14 @@ const commands = {
     const line = Number(input.line)
     const lines = now.includes(line) ? now.filter(l => l !== line) : [...now, line]
     await commands.setBreakpoints({ file, lines })
+  },
+  // Sets the line's breakpoint to stop only when `condition` is true (made
+  // if there is none); an empty condition makes it a plain breakpoint.
+  async setCondition(input) {
+    const file = realpath(path.resolve(state.cwd ?? process.cwd(), input.file))
+    const line = Number(input.line)
+    const rest = (state.breakpoints[file] ?? []).filter(b => b.line !== line).map(b => ({ line: b.line, condition: b.condition ?? '' }))
+    await commands.setBreakpoints({ file, breakpoints: [...rest, { line, condition: String(input.condition ?? '') }] })
   },
   async evaluate(input) { return need().evaluate(String(input.expression ?? input.expr ?? '')) },
   async addWatch(input) {

@@ -13,6 +13,8 @@ type Tab = 'vars' | 'watch' | 'stack' | 'output'
 type Local = {
   cursor: number; top: number; tab: Tab; followed: string; left: number; lowerTop: number; split: number
   isHelpHidden?: boolean; isDetails?: boolean; sel?: number; typing?: string | null
+  // What the field is for: a watch (w), or the condition of a line's breakpoint (B).
+  typingFor?: 'watch' | 'condition'; typingLine?: number
 }
 
 const TABS: Tab[] = ['vars', 'watch', 'stack', 'output']
@@ -39,7 +41,7 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   let local: Local = { cursor: props.current ?? props.firstLine, top: props.firstLine, tab: 'vars', followed: '', left: 0, lowerTop: 0, split: 0.4, ...surface.state }
   // The keys, wrapped onto as many rows as the width needs (? hides them);
   // the details' own keys while they hold the keys, the field while typing.
-  const keys = local.typing != null ? TYPING_KEYS : local.isDetails ? DETAIL_KEYS : KEYS
+  const keys = local.typing != null ? (local.typingFor === 'condition' ? CONDITION_KEYS : TYPING_KEYS) : local.isDetails ? DETAIL_KEYS : KEYS
   const help = props.note ? [] : local.isHelpHidden && local.typing == null ? [[{ key: '?', label: 'keys' }]] : packKeys(keys, columns)
   const helpRows = (props.note ? 1 : help.length) + (local.typing != null ? 1 : 0)
   const lowerRows = Math.max(4, Math.min(rows - 4 - helpRows, Math.floor(rows * local.split)))
@@ -63,12 +65,14 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
     const isCurrent = n === props.current
     const isBreak = props.breakpoints.includes(n)
     const isCursor = n === local.cursor
-    const marker = isCurrent ? '▶' : isBreak ? '●' : ' '
+    // ◆: a breakpoint that stops only when its condition is true.
+    const isConditional = isBreak && Boolean(props.conditions[String(n)])
+    const marker = isCurrent ? '▶' : isConditional ? '◆' : isBreak ? '●' : ' '
     const values = props.values[String(n)]
     const shown = values ? `  ${Object.entries(values).map(([k, v]) => `${k} = ${v}`).join(', ')}` : ''
     codeLines.push(
       <Box key={`l${n}`} flexDirection="row" width={columns} overflow="hidden" backgroundColor={isCurrent ? CURRENT_LINE : undefined}>
-        <Text color={isBreak ? 'red' : 'yellow'} bold>{marker}</Text>
+        <Text color={isCurrent ? 'yellow' : isConditional ? CONDITION_COLOR : 'red'} bold>{marker}</Text>
         <Text dimColor={!isCursor} inverse={isCursor}>{String(n).padStart(numberWidth)} </Text>
         <Text wrap="truncate-end" bold={isCurrent}>
           {slide(highlight(text, lang, carry), local.left).map(seg => <Text color={seg.color} italic={seg.isComment}>{seg.text}</Text>)}
@@ -96,6 +100,10 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
     // Typing a watch expression: every key goes to the field.
     if (at.typing != null) {
       if (event.key === 'return') {
+        if (at.typingFor === 'condition') {
+          surface.post({ cmd: 'setCondition', line: at.typingLine ?? at.cursor, condition: at.typing.trim() })
+          return surface.setState({ ...at, typing: null })
+        }
         if (at.typing.trim()) surface.post({ cmd: 'addWatch', expr: at.typing.trim() })
         return surface.setState({ ...at, typing: null, tab: at.typing.trim() ? 'watch' : at.tab })
       }
@@ -104,7 +112,9 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
       if (ch.length === 1 && !event.ctrl && !event.meta) return surface.setState({ ...at, typing: at.typing + ch })
       return
     }
-    if (event.key === 'w') return surface.setState({ ...at, typing: '' })
+    if (event.key === 'w') return surface.setState({ ...at, typing: '', typingFor: 'watch' })
+    // B: a breakpoint that stops only when a condition is true (its current one to edit).
+    if (event.key === 'B') return surface.setState({ ...at, typing: props.conditions[String(at.cursor)] ?? '', typingFor: 'condition', typingLine: at.cursor })
     if (event.key === 'e') return surface.setState({ ...at, isDetails: !at.isDetails, sel: at.sel ?? 0 })
     if (at.isDetails) {
       const by = { up: -1, k: -1, down: 1, j: 1, pageup: -room, pagedown: room }[event.key]
@@ -150,7 +160,12 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
       <Text wrap="truncate-end" bold color={props.error ? 'red' : STATUS_COLOR[props.status]}>
         {headline(props)}
       </Text>
-      {local.typing != null && <Text wrap="truncate-end"><Text color={KEY_COLOR} bold>watch: </Text>{local.typing}<Text inverse> </Text></Text>}
+      {local.typing != null && (
+        <Text wrap="truncate-end">
+          <Text color={KEY_COLOR} bold>{local.typingFor === 'condition' ? `stop at line ${local.typingLine} when: ` : 'watch: '}</Text>
+          {local.typing}<Text inverse> </Text>
+        </Text>
+      )}
       {props.note
         ? <Text wrap="truncate-end" dimColor>{props.note}</Text>
         : help.map((row, i) => (
@@ -212,6 +227,7 @@ const KEYS: KeyHelp[] = [
   { key: 'r', label: 'run' },
   { key: 'q', label: 'stop' },
   { key: 'b', label: 'breakpoint' },
+  { key: 'B', label: 'break when…' },
   { key: 't', label: 'test data' },
   { key: '↑↓', label: 'line' },
   { key: '←→', label: 'slide' },
@@ -232,11 +248,16 @@ const DETAIL_KEYS: KeyHelp[] = [
   { key: 'n s o c', label: 'step' },
   { key: 'e', label: 'back to the code' },
 ]
+const CONDITION_KEYS: KeyHelp[] = [
+  { key: '↵', label: 'set (empty: always stop)' },
+  { key: '⌫', label: 'delete' },
+]
 const TYPING_KEYS: KeyHelp[] = [
   { key: '↵', label: 'add the watch (empty: cancel)' },
   { key: '⌫', label: 'delete' },
 ]
 const KEY_COLOR = '#e5c07b'
+const CONDITION_COLOR = '#d19a66'
 
 // Lays the keys out in rows no wider than the panel.
 function packKeys(keys: KeyHelp[], width: number): KeyHelp[][] {
@@ -286,6 +307,8 @@ function lowerPanel(props: ViewProps, tab: Tab, cursor: number, width: number): 
     if (code || values) {
       add(`Line ${cursor}`, { bold: true })
       if (code) add(`  ${code}`, {}, 4)
+      const condition = props.conditions[String(cursor)]
+      if (condition) add(`  ◆ stops only when ${condition}`, { color: CONDITION_COLOR }, 4)
       for (const [name, value] of Object.entries(values ?? {})) add(`  ${name} = ${value}`, { color: VALUES }, 4)
     }
     if (!props.scopes.length) add(props.status === 'paused' ? 'No variables here.' : 'Variables show while the program is paused.', { dim: true })

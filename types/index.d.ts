@@ -9,7 +9,8 @@ export type Scope = { name: string; vars: Var[]; ref?: number }
 
 export type Frame = { name: string; file: string; line: number }
 
-export type Breakpoint = { line: number; verified: boolean }
+// condition: stop only when this expression is true.
+export type Breakpoint = { line: number; verified: boolean; condition?: string }
 
 export type Status = 'idle' | 'starting' | 'running' | 'paused' | 'ended' | 'error'
 
@@ -58,6 +59,8 @@ export type ViewProps = {
   firstLine: number
   current: number | null
   breakpoints: number[]
+  // line -> the condition of its breakpoint, for a conditional one.
+  conditions: Record<string, string>
   values: Record<string, Record<string, string>>
   reason: string
   frame: string
@@ -78,6 +81,8 @@ export type ViewMessage =
   // t: ask Claude to write test data for the breakpoints (or the cursor's function) and start.
   | { cmd: 'testData'; line: number }
   | { cmd: 'addWatch' | 'removeWatch'; expr: string }
+  // B: stop at this line only when the condition is true ('' for always).
+  | { cmd: 'setCondition'; line: number; condition: string }
   | { cmd: 'toggleExpand'; path: string[] }
 
 declare module 'claude-code' {
