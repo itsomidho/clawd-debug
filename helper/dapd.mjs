@@ -229,6 +229,9 @@ class Base {
   constructor(lang) {
     this.lang = lang
     this.prev = null // the last stop's frame and locals, to see what a line changed
+    // What the paused line will set, worked out before it runs ({ line, name, value }):
+    // for a value the language drops before the next stop (Node at a return).
+    this.predicted = null
     this.ended = false
   }
 
@@ -261,6 +264,9 @@ class Base {
         if (isReturn(name)) continue
         if (prev.locals.get(name) !== value && mentions(text, name)) changed[name] = value
       }
+      // A name the line set that is gone now: use the value worked out before it ran.
+      const guess = this.predicted
+      if (guess && guess.line === prev.line && !locals.has(guess.name) && !(guess.name in changed)) changed[guess.name] = guess.value
       if (Object.keys(changed).length) pin(prev.file, prev.line, changed)
     }
     for (const [name, value] of locals) {
@@ -612,7 +618,26 @@ class NodeDebug extends Base {
     this.callFrameId = top?.callFrameId ?? null
     const scopes = top ? await this.readScopes(top) : []
     const reason = params.reason === 'other' ? (params.hitBreakpoints?.length ? 'breakpoint' : 'step') : params.reason
+    // Node leaves a function's block scope before its return stop, so the
+    // line before a return would show nothing: work out what it will set now,
+    // before the pause is announced and a step can resume the program.
+    const guess = top && frames[0] ? await this.predict(top.callFrameId, frames[0].file, frames[0].line).catch(() => null) : null
     this.publish(frames, scopes, reason)
+    this.predicted = guess
+  }
+
+  // For a line `[const|let|var] name = expr;` (or `+=` and the like), the
+  // value it will set, evaluated where it is paused with V8's side-effect
+  // check on: anything that could change state is refused, so nothing runs twice.
+  async predict(callFrameId, file, line) {
+    const text = sourceLine(file, line)
+    const m = /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*([-+*/%]|\*\*|\?\?|\|\||&&)?=(?!=)\s*(.+?)\s*;?\s*$/.exec(text)
+    if (!m || !balanced(m[3])) return null
+    const [, name, op, rhs] = m
+    const expression = op ? `${name} ${op} (${rhs})` : `(${rhs})`
+    const answer = await this.call('Debugger.evaluateOnCallFrame', { callFrameId, expression, generatePreview: true, throwOnSideEffect: true, silent: true })
+    if (answer.exceptionDetails || !answer.result) return null
+    return { line, name, value: clip(formatRemote(answer.result)) }
   }
 
   // Block scopes and the function's own scope read as one "Locals", the way
@@ -711,6 +736,22 @@ class NodeDebug extends Base {
     try { this.child?.kill() } catch {}
     this.close('stopped')
   }
+}
+
+// Brackets and quotes close on the line: a statement that goes on to the next
+// line is not worked out ahead.
+function balanced(text) {
+  let depth = 0
+  let quote = ''
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue }
+    if (ch === '"' || ch === "'" || ch === '`') quote = ch
+    else if ('([{'.includes(ch)) depth++
+    else if (')]}'.includes(ch)) depth--
+    if (depth < 0) return false
+  }
+  return depth === 0 && !quote
 }
 
 function formatRemote(o) {
