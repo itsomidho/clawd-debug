@@ -48,6 +48,13 @@ const state = {
   // Open rows of the variable tree and the watches, by path (JSON of the
   // names from the scope or "Watch" down): their children are read at every stop.
   expanded: [],
+  // Test cases the program reported (`@@clawd-case {json}` lines on stdout):
+  // [{ name, ok, expected?, actual?, error? }], in order.
+  cases: [],
+  // The case a rerun runs alone (CLAWD_CASE), '' for all.
+  caseFilter: '',
+  // Goes up by one with each run, so the pane knows a new run's cases.
+  runId: 0,
   output: [], // [{ category, text }]
   exitCode: null,
   error: null,
@@ -90,7 +97,50 @@ function waitForSettle(ms) {
   })
 }
 
+// A harness reports each test case as one stdout line:
+//   @@clawd-case {"name": "...", "ok": true, "expected": ..., "actual": ...}
+// Those lines become state.cases and stay out of the output.
+const CASE_MARK = '@@clawd-case '
+let caseBuffer = ''
+
+function takeCases(text) {
+  const pieces = (caseBuffer + text).split(/(?<=\n)/)
+  caseBuffer = ''
+  let rest = ''
+  for (const piece of pieces) {
+    const line = piece.replace(/\r?\n$/, '')
+    const isWhole = piece.endsWith('\n')
+    if (!isWhole && (CASE_MARK.startsWith(piece) || piece.startsWith(CASE_MARK))) { caseBuffer = piece; continue }
+    if (isWhole && line.startsWith(CASE_MARK)) {
+      try {
+        const one = JSON.parse(line.slice(CASE_MARK.length))
+        // A rerun of one case updates its row in the full run's list.
+        const at = state.cases.findIndex(c => c.name === String(one.name))
+        const row = {
+          name: String(one.name ?? `case ${state.cases.length + 1}`),
+          ok: one.ok === true,
+          ...(one.expected !== undefined ? { expected: clip(show(one.expected)) } : {}),
+          ...(one.actual !== undefined ? { actual: clip(show(one.actual)) } : {}),
+          ...(one.error ? { error: clip(String(one.error)) } : {}),
+        }
+        if (at >= 0) state.cases[at] = row
+        else state.cases.push(row)
+      } catch {
+        rest += piece
+      }
+      continue
+    }
+    rest += piece
+  }
+  return rest
+}
+
+function show(value) {
+  return typeof value === 'string' ? JSON.stringify(value) : JSON.stringify(value) ?? String(value)
+}
+
 function addOutput(category, text) {
+  if (category === 'stdout' || category === 'console') text = takeCases(text)
   if (!text) return
   state.output.push({ category, text: text.length > MAX_OUTPUT_CHARS ? `…${text.slice(-MAX_OUTPUT_CHARS)}` : text })
   if (state.output.length > MAX_OUTPUT) state.output.splice(0, state.output.length - MAX_OUTPUT)
@@ -220,6 +270,7 @@ const LANGS = {
       program: config.program,
       args: config.args,
       cwd: config.cwd,
+      env: config.env,
       console: 'internalConsole',
       redirectOutput: true,
       justMyCode: true,
@@ -347,6 +398,8 @@ class Base {
     if (session === this) session = null
     if (state.status !== 'error') state.status = 'ended'
     state.stop = null
+    // No stack once the program is gone; the last values stay to read.
+    state.frames = []
     emit()
     settle()
   }
@@ -597,7 +650,7 @@ class NodeDebug extends Base {
   async start(config) {
     this.child = spawn(process.execPath, ['--inspect-brk=127.0.0.1:0', config.program, ...config.args], {
       // No terminal for the program either (see the Python adapter above).
-      cwd: config.cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+      cwd: config.cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, ...config.env },
     })
     this.child.on('exit', code => { state.exitCode = code; this.end() })
     this.child.stdout.on('data', d => { addOutput('stdout', d.toString()); emit() })
@@ -930,7 +983,7 @@ class PhpDebug extends Base {
     const target = await phpTarget(config.program)
     this.target = target
     const remote = this.toRemote(config.program)
-    const env = ['-e', 'XDEBUG_TRIGGER=1', '-e', `XDEBUG_CONFIG=idekey=clawd-debug`]
+    const env = ['-e', 'XDEBUG_TRIGGER=1', '-e', `XDEBUG_CONFIG=idekey=clawd-debug`, ...Object.entries(config.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`])]
     let argv
     if (target.container) {
       const cwd = this.toRemote(config.cwd && config.cwd.startsWith(target.hostRoot) ? config.cwd : path.dirname(config.program))
@@ -964,7 +1017,7 @@ class PhpDebug extends Base {
       this.onEarlyExit = code => { clearTimeout(timer); reject(new Error(`PHP ended before Xdebug connected (exit ${code})`)) }
     })
     addOutput('clawd-debug', `$ ${argv.slice(target.container ? 0 : 0).join(' ')}\n`)
-    this.child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    this.child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, ...config.env } })
     this.child.stdout.on('data', d => { addOutput('stdout', d.toString()); emit() })
     this.child.stderr.on('data', d => { addOutput('stderr', d.toString()); emit() })
     this.child.on('exit', code => {
@@ -1381,8 +1434,10 @@ const commands = {
     const program = realpath(path.resolve(input.cwd ?? process.cwd(), input.program))
     if (!fs.existsSync(program)) throw new Error(`no such file: ${program}`)
     const lang = langFor(program, input.lang)
-    const config = { program, args: input.args ?? [], cwd: realpath(input.cwd ?? path.dirname(program)), lang }
-    lastConfig = config
+    const env = Object.fromEntries(Object.entries(input.env ?? {}).map(([k, v]) => [String(k), String(v)]))
+    const config = { program, args: input.args ?? [], cwd: realpath(input.cwd ?? path.dirname(program)), lang, env }
+    // A rerun of one case keeps the last full run to come back to.
+    if (!input.isCaseRun) lastConfig = config
     if (input.breakpoints) {
       state.breakpoints = {}
       for (const bp of input.breakpoints) {
@@ -1397,7 +1452,10 @@ const commands = {
       status: 'starting', lang, program, cwd: config.cwd, args: config.args,
       stop: null, frames: [], scopes: [], lineValues: {}, output: [], exitCode: null, error: null, steps: 0,
       watches: state.watches.map(({ expr }) => ({ expr, name: expr, value: '', type: '', ref: 0 })),
+      // A rerun of one case keeps the full run's cases, to update its own row.
+      cases: input.isCaseRun ? state.cases : [], caseFilter: env.CLAWD_CASE ?? '', runId: state.runId + 1,
     })
+    caseBuffer = ''
     emit()
     const backend = LANGS[lang].backend
     const debug = backend === 'cdp' ? new NodeDebug(lang) : backend === 'dbgp' ? new PhpDebug(lang) : new Debug(lang)
@@ -1414,6 +1472,14 @@ const commands = {
   async restart() {
     if (!lastConfig) throw new Error('nothing to restart yet')
     await commands.start({ ...lastConfig, breakpoints: undefined })
+  },
+  // Runs the last program again for one test case only (CLAWD_CASE=name),
+  // so it stops at the breakpoints on that case's way.
+  async rerunCase(input) {
+    if (!lastConfig) throw new Error('nothing to rerun yet')
+    const name = String(input.name ?? '')
+    if (!name) throw new Error('rerunCase needs "name"')
+    await commands.start({ ...lastConfig, env: { ...lastConfig.env, CLAWD_CASE: name }, breakpoints: undefined, isCaseRun: true })
   },
   async stop() { if (session) await session.stop() },
   next: () => need().step('next'),
@@ -1493,13 +1559,13 @@ function need() {
   return session
 }
 
-const STEPS = new Set(['start', 'restart', 'next', 'stepIn', 'stepOut', 'continue'])
+const STEPS = new Set(['start', 'restart', 'rerunCase', 'next', 'stepIn', 'stepOut', 'continue'])
 
 async function run(input) {
   const name = input?.cmd
   if (!commands[name]) throw new Error(`unknown command "${name}"`)
   // A new run first ends the old one: its end must not answer the new wait.
-  if ((name === 'start' || name === 'restart') && session) await session.stop()
+  if ((name === 'start' || name === 'restart' || name === 'rerunCase') && session) await session.stop()
   const settled = input.wait && STEPS.has(name) ? waitForSettle(Number(input.timeoutMs ?? 30000)) : null
   const extra = (await commands[name](input)) ?? {}
   if (settled) await settled

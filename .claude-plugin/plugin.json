@@ -1,6 +1,6 @@
 {
   "name": "clawd-debug",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "A step debugger beside the conversation: set a breakpoint, let Claude run your code with test data, and step line by line while every variable and line value shows",
   "author": {
     "name": "Omid Hosseini",
@@ -17,5 +17,21 @@
   ],
   "types": "./types/index.d.ts",
   "homepage": "https://github.com/itsomidho/clawd-debug",
-  "repository": "https://github.com/itsomidho/clawd-debug"
+  "repository": "https://github.com/itsomidho/clawd-debug",
+  "userConfig": {
+    "icons": {
+      "type": "string",
+      "title": "Icons",
+      "description": "auto: with a Nerd Font installed, line icons (VS Code's Codicons); else symbols every font has. line, nerd, outline, simple or off to force one.",
+      "options": [
+        "auto",
+        "line",
+        "nerd",
+        "outline",
+        "simple",
+        "off"
+      ],
+      "default": "auto"
+    }
+  }
 }

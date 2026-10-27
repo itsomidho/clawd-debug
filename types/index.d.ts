@@ -36,7 +36,15 @@ export type DebugState = {
   watches?: Watch[]
   // Open rows by path: JSON of the names from the scope (or "Watch") down.
   expanded?: string[]
+  // Test cases the program reported, the case a rerun runs alone, and a
+  // number that goes up with each run. Optional: older values have none.
+  cases?: Case[]
+  caseFilter?: string
+  runId?: number
 }
+
+// One test case of a harness: its result against what was expected.
+export type Case = { name: string; ok: boolean; expected?: string; actual?: string; error?: string }
 
 // A row of the variable tree or the watches, as the view draws it.
 export type ViewVar = {
@@ -48,7 +56,12 @@ export type ViewVar = {
   isOpen: boolean
   children: ViewVar[]
   error?: string
+  // Its value differs from the previous stop in the same function (or it is new there).
+  changed?: boolean
 }
+
+// One line of the program's output; isError: it came on stderr.
+export type ViewOutput = { text: string; isError?: boolean }
 
 // What the hooks module hands the view (the Client) to draw.
 export type ViewProps = {
@@ -67,8 +80,13 @@ export type ViewProps = {
   steps: number
   scopes: { name: string; vars: ViewVar[] }[]
   watches: ViewVar[]
+  cases: Case[]
+  caseFilter: string
+  runId: number
+  // The icons for this install (Codicons, symbols, or none), by name.
+  glyphs?: Record<string, string>
   frames: Frame[]
-  output: string[]
+  output: ViewOutput[]
   note: string
   // The uncaught error the program stopped on, '' for none.
   error: string
@@ -84,6 +102,12 @@ export type ViewMessage =
   // B: stop at this line only when the condition is true ('' for always).
   | { cmd: 'setCondition'; line: number; condition: string }
   | { cmd: 'toggleExpand'; path: string[] }
+  // ↵ on a test case: run it alone, stopping at its breakpoints.
+  | { cmd: 'rerunCase'; name: string }
+  // f: the next failing case, alone.
+  | { cmd: 'rerunFailing' }
+  // x: ask Claude to explain the current stop.
+  | { cmd: 'explain' }
 
 declare module 'claude-code' {
   interface PluginState {

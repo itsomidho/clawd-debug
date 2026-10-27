@@ -19,13 +19,23 @@ You can also just ask Claude: "debug `calc_total` with test data", "run `registe
 
 With [clawd-git](https://github.com/itsomidho/clawd-git) 0.4.4 or later, a ▷ on a file's row (and **Debug** on its diff) opens the file here.
 
-## Keys (click the pane first; Escape gives the keys back)
+## Test cases
+
+Press `t` (or ask Claude) and Claude writes the test data as named cases, each with the result it *should* give, worked out from what the code is meant to do. The run shows a ✓/✗ table in the Cases tab: a failing case shows what was expected and what came back, or its error. `↵` (or `f`) reruns a failing case alone, stopping at your breakpoints on its way, with its data in the variables; the list keeps the other cases.
+
+A harness reports its cases through a small helper in `helper/cases/` (`clawd_case.php`, `clawd_case.py`, `clawd_case.js`), copied next to it: each case prints one `@@clawd-case {json}` line, which the debugger reads and keeps out of the output.
+
+## Keys
+
+When the program stops, or a run ends with test cases, the pane takes the keys by itself, so the step bar's keys work without a click: `n` next, `s` into, `o` out, `c` continue, `x` ask Claude to explain this stop, `r` run, `t` test data, `q` stop, `f` rerun the next failing case. `↵` does the next thing (next at a stop, the failing case after a run). The keys below are the code view's: click the code first (Escape gives the keys back).
+
 
 | | |
 |---|---|
-| `n` `s` `o` `c` | next line, step into, step out, continue |
+| `n` `s` `o` `c` `x` | next line, step into, step out, continue, explain |
 | `r` `q` | run (again), stop |
 | `b` `t` | breakpoint on the cursor's line, test data from Claude |
+| `↵` on a case | rerun it alone (Cases tab) |
 | `B` | a breakpoint that stops only when a condition is true (`$price > 100`, `i == 41`), drawn `◆`; `B` again edits it, an empty condition makes it plain |
 | `↑` `↓` | move the cursor; the details show that line whole and what it set |
 | `←` `→` | slide long lines sideways |
@@ -45,6 +55,10 @@ With [clawd-git](https://github.com/itsomidho/clawd-git) 0.4.4 or later, a ▷ o
 | PHP | Xdebug 3 with `xdebug.mode=debug`. A file inside a running Docker container's bind mount runs there (the container is found by its mounts); inside a WordPress install it runs with `wp eval-file`, so WordPress is loaded. A plugin or theme file is not run itself: `r` loads WordPress, so its breakpoints in code that runs on load stop. Stepping into WordPress core or `vendor/` steps back out (what it returned shows on your line). Otherwise the local `php` with Xdebug. |
 
 Claude's test scripts go in `.clawd-debug/` in your project; Claude adds that folder to `.git/info/exclude` so it is never committed.
+
+## Settings
+
+`icons` (in `/plugin`, clawd-debug's options): `auto` uses VS Code's Codicons when a Nerd Font is installed, else symbols every font has; `line`, `nerd`, `outline`, `simple` or `off` force one, the same choices as clawd-git.
 
 ## How it works
 

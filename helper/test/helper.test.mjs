@@ -213,6 +213,30 @@ describe('Node', () => {
     assert.deepEqual(plain.state.breakpoints[calc].map(b => [b.line, b.condition ?? '']), [[5, '']])
   })
 
+  test('test cases: a ✓/✗ list, and a rerun of one case stops on its way and keeps the list', async () => {
+    const cases = path.join(FIX, 'cases.js')
+    const { state } = await helper.cmd({ cmd: 'start', program: cases, breakpoints: [] })
+    assert.equal(state.status, 'ended')
+    assert.deepEqual(state.cases.map(c => [c.name, c.ok]), [['two items', true], ['empty', true], ['wrong on purpose', false], ['throws', false]])
+    assert.deepEqual([state.cases[2].expected, state.cases[2].actual], ['5', '6'])
+    assert.match(state.cases[3].error, /TypeError/)
+    assert.ok(!state.output.some(o => o.text.includes('@@clawd-case')), 'case lines stay out of the output')
+    // Alone, with a breakpoint in the code under test: it stops there for that case only.
+    await helper.request('POST', '/cmd', { cmd: 'setBreakpoints', file: cases, lines: [4] })
+    const rerun = await helper.cmd({ cmd: 'rerunCase', name: 'wrong on purpose' })
+    assert.equal(rerun.state.stop.line, 4)
+    assert.equal(rerun.state.caseFilter, 'wrong on purpose')
+    assert.equal(rerun.state.scopes[0].vars.find(v => v.name === 'items')?.value, '[{price: 2, qty: 3}]')
+    const done = (await helper.cmd({ cmd: 'continue' })).state
+    assert.equal(done.cases.length, 4, 'the full list is kept')
+    assert.deepEqual(done.cases[2], { name: 'wrong on purpose', ok: false, expected: '5', actual: '6' })
+    // Alone, an error is not caught by the case helper: the run stops on it.
+    await helper.request('POST', '/cmd', { cmd: 'setBreakpoints', file: cases, lines: [] })
+    const thrown = (await helper.cmd({ cmd: 'rerunCase', name: 'throws' })).state
+    assert.equal(thrown.stop.reason, 'exception')
+    await helper.request('POST', '/cmd', { cmd: 'stop' })
+  })
+
   test('a new run started while one is paused answers for the new run', async () => {
     await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 2 }] })
     const { state } = await helper.cmd({ cmd: 'start', program: calc, breakpoints: [{ file: calc, line: 2 }] })
