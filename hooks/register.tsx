@@ -30,8 +30,12 @@ type Answer = { ok: boolean; error?: string; state?: DebugState; result?: string
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({ name: 'dbg', description: 'Step debugger: /dbg <file>[:line] [args], /dbg next|in|out|continue|stop, /dbg setup' })
-    for (const tool of TOOLS) await $.tool.register(tool)
+    // Registered without holding the session's start: awaiting them cost every
+    // session about 0.6 s to open, and they are in place before the first prompt.
+    void Promise.all([
+      $.command.register({ name: 'dbg', description: 'Step debugger: /dbg <file>[:line] [args], /dbg next|in|out|continue|stop, /dbg setup' }),
+      ...TOOLS.map(tool => $.tool.register(tool)),
+    ]).catch(error => $.ui.log(`registering /dbg and the tools failed: ${String(error)}`, { to: 'debug' }))
 
     // The helper lives as long as the module: leaving the loop kills it.
     const runtime = (await $.env.get('XDG_RUNTIME_DIR')) || '/tmp'
