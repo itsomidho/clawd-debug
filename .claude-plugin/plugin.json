@@ -1,6 +1,6 @@
 {
   "name": "clawd-debug",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A step debugger beside the conversation: set a breakpoint, let Claude run your code with test data, and step line by line while every variable and line value shows",
   "author": {
     "name": "Omid Hosseini",

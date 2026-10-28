@@ -17,6 +17,10 @@ type Local = {
   typingFor?: 'watch' | 'condition'; typingLine?: number
   // The run whose test cases were last shown: a new run's cases open the tab once.
   casesRun?: number
+  // The last mouse wheel tick taken (props.wheel).
+  wheelId?: number
+  // The scrollbar is held: pointer moves drag the code window.
+  isDragging?: boolean
 }
 
 const TABS: Tab[] = ['vars', 'watch', 'cases', 'stack', 'output']
@@ -42,7 +46,7 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
 
   // Follow the program: when it stops somewhere new, the cursor goes there.
   const spot = `${props.file}:${props.current ?? ''}:${props.steps}`
-  let local: Local = { cursor: props.current ?? props.firstLine, top: props.firstLine, tab: 'vars', followed: '', left: 0, lowerTop: 0, split: 0.4, isHelpHidden: true, ...surface.state }
+  let local: Local = { cursor: props.current ?? props.firstLine, top: props.firstLine, tab: 'vars', followed: '', left: 0, lowerTop: 0, split: 0.4, isHelpHidden: true, wheelId: props.wheel?.at(-1)?.id ?? 0, ...surface.state }
   // Rows: the field (while typing), the code card (2 border rows + its title),
   // the tab row, then the details.
   const fieldRows = local.typing != null ? 1 : 0
@@ -53,6 +57,19 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   if (local.followed !== spot && props.current != null) {
     local = { ...local, cursor: props.current, top: around(props.current, codeRows, props.firstLine, last), followed: spot, lowerTop: 0 }
   }
+  // The mouse wheel: over the code it moves the window (the cursor kept
+  // inside it), over the details it scrolls them, three rows a tick.
+  const ticks = (props.wheel ?? []).filter(t => t.id > (local.wheelId ?? 0))
+  const lastTick = props.wheel?.at(-1)?.id
+  const isWheelNew = lastTick !== undefined && lastTick !== local.wheelId
+  const isOverCode = (row: number) => !isHelp && row < fieldRows + codeRows + 3
+  let lowerWheel = 0
+  for (const tick of ticks) {
+    if (!isOverCode(tick.row)) { lowerWheel += tick.by; continue }
+    const top = clamp(local.top + tick.by * 3, props.firstLine, Math.max(props.firstLine, last - codeRows + 1))
+    local = { ...local, top, cursor: clamp(local.cursor, top, Math.min(last, top + codeRows - 1)) }
+  }
+  if (isWheelNew) local = { ...local, wheelId: lastTick }
   local = { ...local, top: keepVisible(local.cursor, local.top, codeRows, props.firstLine, last) }
   // A run that ended with test cases opens them once, the keys in the list and
   // the first failing case selected: ↵ reruns it at its breakpoints.
@@ -65,6 +82,12 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
 
   // ---- the code card
   const inner = columns - 4 // the card's border and padding
+  // A scrollbar at the card's right edge when the file is longer than the window.
+  const total = last - props.firstLine + 1
+  const hasBar = total > codeRows
+  const thumbSize = hasBar ? Math.max(1, Math.round((codeRows * codeRows) / total)) : 0
+  const thumbAt = hasBar ? Math.round(((local.top - props.firstLine) / Math.max(1, total - codeRows)) * (codeRows - thumbSize)) : 0
+  const lineWidth = hasBar ? inner - 1 : inner
   const numberWidth = String(last).length
   const lang = langOf(props.file)
   // Comments and strings can span lines: carry the state from the file's
@@ -73,7 +96,8 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   for (let n = props.firstLine; n < local.top; n++) highlight(props.lines[n - props.firstLine] ?? '', lang, carry)
   const codeLines: RenderElement[] = []
   for (let n = local.top; n < local.top + codeRows; n++) {
-    if (n > last) { codeLines.push(<Text key={`l${n}`}> </Text>); continue }
+    const bar = hasBar ? <Text key={`bar${n}`} color={n - local.top >= thumbAt && n - local.top < thumbAt + thumbSize ? SCROLL_THUMB : SCROLL_TRACK}>{n - local.top >= thumbAt && n - local.top < thumbAt + thumbSize ? '┃' : '│'}</Text> : null
+    if (n > last) { codeLines.push(<Box key={`l${n}`} flexDirection="row" width={inner} height={1}><Box width={lineWidth}><Text> </Text></Box>{bar}</Box>); continue }
     const text = (props.lines[n - props.firstLine] ?? '').replace(/\t/g, '    ')
     const isCurrent = n === props.current
     const isBreak = props.breakpoints.includes(n)
@@ -84,7 +108,8 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
     const values = props.values[String(n)]
     const shown = values ? `  ${Object.entries(values).map(([k, v]) => `${k} = ${v}`).join(', ')}` : ''
     codeLines.push(
-      <Box key={`l${n}`} flexDirection="row" width={inner} overflow="hidden" backgroundColor={isCurrent ? CURRENT_LINE : undefined}>
+      <Box key={`l${n}`} flexDirection="row" width={inner} height={1} overflow="hidden">
+      <Box key={`lb${n}`} flexDirection="row" width={lineWidth} height={1} overflow="hidden" backgroundColor={isCurrent ? CURRENT_LINE : undefined}>
         {/* A click on the gutter sets or clears the line's breakpoint; on the code, moves the cursor there. */}
         <Box key={`gutterbox:${n}`} flexShrink={0}>
           <Button key={`gutter:${n}`} plain hover={{ color: ERR }} onPress={() => { surface.post({ cmd: 'toggleBreakpoint', line: n }) }}>
@@ -98,12 +123,17 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
             <Text color={VALUES} dimColor={!isCurrent}>{local.left > text.length ? shown.slice(Math.min(shown.length, local.left - text.length)) : shown}</Text>
           </Text>
         </Button>
+      </Box>
+      {bar}
       </Box>,
     )
   }
   const fileName = props.file.split('/').pop() ?? ''
-  const folder = props.file ? props.file.slice(0, props.file.length - fileName.length - 1).replace(/^\/home\/[^/]+/, '~') : ''
   const breaks = props.breakpoints.length
+  const breaksText = breaks ? `  ·  ${breaks} breakpoint${breaks > 1 ? 's' : ''}` : ''
+  const folder = props.file
+    ? fitFolder(shortFolder(props.file.slice(0, props.file.length - fileName.length - 1), props.root ?? ''), inner - cells(`${g.file ? `${g.file} ` : ''}${fileName}`) - 2 - cells(breaksText))
+    : ''
 
   // ---- the details
   const all = lowerPanel(props, local.isHelpHidden ? local.tab : 'help', local.cursor, columns - 1, local)
@@ -117,6 +147,15 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   // a selected row is kept in sight.
   let lowerTop = local.tab === 'output' && local.lowerTop === 0 ? Math.max(0, all.length - room) : Math.min(local.lowerTop, Math.max(0, all.length - room))
   if (selRow != null) lowerTop = selRow < lowerTop ? selRow : selRow >= lowerTop + room ? selRow - room + 1 : lowerTop
+  // The wheel over the details: moves the selection while there is one, else scrolls.
+  if (lowerWheel && local.isDetails && items.length) {
+    local = { ...local, sel: clamp(sel + Math.sign(lowerWheel) * Math.max(1, Math.abs(lowerWheel)), 0, items.length - 1) }
+  } else if (lowerWheel) {
+    lowerTop = clamp(lowerTop + lowerWheel * 3, 0, Math.max(0, all.length - room))
+    // Output scrolled back to its end follows it again.
+    local = { ...local, lowerTop: local.tab === 'output' && lowerTop >= all.length - room ? 0 : lowerTop }
+  }
+  if (isWheelNew) surface.setState(local)
 
   // What a click does: show a tab; select a row and act on it; start a watch.
   const showTab = (tab: Tab) => {
@@ -136,6 +175,18 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
     const at: Local = { ...local, ...surface.state }
     surface.setState({ ...at, typing: '', typingFor: 'watch' })
   }
+
+  // The scrollbar: a click on it jumps there, a drag moves the window.
+  surface.onPointer(event => {
+    const at: Local = { ...local, ...surface.state }
+    const y = event.y - (fieldRows + 2) // the code card's border and title
+    const isOnBar = hasBar && event.x >= columns - 4 && event.x <= columns - 2 && y >= 0 && y < codeRows
+    if (event.type === 'up') return at.isDragging ? surface.setState({ ...at, isDragging: false }) : undefined
+    if (!((event.type === 'down' && event.button === 'left' && isOnBar) || (event.type === 'move' && at.isDragging))) return
+    const span = Math.max(1, codeRows - thumbSize)
+    const top = props.firstLine + Math.round((clamp(y - Math.floor(thumbSize / 2), 0, span) / span) * Math.max(0, total - codeRows))
+    surface.setState({ ...at, isDragging: true, top, cursor: clamp(at.cursor, top, Math.min(last, top + codeRows - 1)) })
+  })
 
   surface.onKey(event => {
     const at: Local = { ...local, ...surface.state }
@@ -222,7 +273,7 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
       {!isHelp && <Box borderStyle="round" borderColor={BORDER} paddingX={1} flexDirection="column" height={codeRows + 3}>
         <Box flexDirection="row" height={1} overflow="hidden">
           <Text color={ACCENT} bold>{`${g.file ? `${g.file} ` : ''}${fileName || 'no file'}`}</Text>
-          <Text dimColor wrap="truncate-end">{`  ${folder}${breaks ? `  ·  ${breaks} breakpoint${breaks > 1 ? 's' : ''}` : ''}`}</Text>
+          <Text dimColor wrap="truncate-end">{`  ${folder}${breaksText}`}</Text>
         </Box>
         <Box flexDirection="column" height={codeRows} overflow="hidden">
           {props.lines.length ? codeLines : <Text dimColor>{'Nothing to show yet. Ask Claude to debug a function, or run /dbg <file>:<line>.'}</Text>}
@@ -297,7 +348,7 @@ const HELP: { title: string; keys: KeyHelp[] }[] = [
     { key: 't', label: 'test cases from Claude' }, { key: 'f', label: 'rerun the next failing case' }, { key: 'x', label: 'ask Claude to explain this stop' },
   ] },
   { title: 'CODE (click it first)', keys: [
-    { key: '↑ ↓  PgUp PgDn', label: 'move the cursor' }, { key: 'g', label: 'back to the stop' }, { key: '← →  0', label: 'slide long lines' },
+    { key: '↑ ↓  PgUp PgDn', label: 'move the cursor' }, { key: 'g', label: 'back to the stop' }, { key: '← →  0', label: 'slide long lines' }, { key: 'wheel, scrollbar', label: 'scroll the code' },
     { key: 'b', label: 'breakpoint on the cursor line' }, { key: 'B', label: 'breakpoint with a condition' }, { key: 'w', label: 'add a watch expression' },
   ] },
   { title: 'DETAILS', keys: [
@@ -319,6 +370,8 @@ const ERR = '#e06c75'
 const OK = '#98c379'
 const WARN = '#e5c07b'
 const LINE_NUMBER = '#4b5263'
+const SCROLL_THUMB = '#7f848e'
+const SCROLL_TRACK = '#3e4451'
 const RULE = 'subtle'
 const CONDITION_COLOR = '#d19a66'
 
@@ -577,6 +630,30 @@ function slide(segs: Seg[], left: number): Seg[] {
     skip = 0
   }
   return out
+}
+
+// A file's folder as the header shows it: from the project (its name, then
+// the path inside it), else with ~ for the home folder.
+function shortFolder(folder: string, root: string): string {
+  const base = root.replace(/\/+$/, '')
+  if (base && (folder === base || folder.startsWith(`${base}/`))) {
+    const name = base.split('/').pop() ?? base
+    return folder === base ? name : `${name}/${folder.slice(base.length + 1)}`
+  }
+  return folder.replace(/^\/home\/[^/]+(?=\/|$)/, '~')
+}
+
+// The folder in `room` cells: whole folders cut from the front (…/), so its
+// end, nearest the file, stays; the last folder cut at its start if alone.
+function fitFolder(folder: string, room: number): string {
+  if (cells(folder) <= room) return folder
+  const parts = folder.split('/')
+  for (let i = 1; i < parts.length; i++) {
+    const tail = `…/${parts.slice(i).join('/')}`
+    if (cells(tail) <= room) return tail
+  }
+  const lastPart = parts.at(-1) ?? ''
+  return room <= 1 ? '' : `…${[...lastPart].slice(-(room - 1)).join('')}`
 }
 
 function clamp(n: number, low: number, high: number): number {

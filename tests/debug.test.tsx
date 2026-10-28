@@ -31,12 +31,12 @@ function lastAct(sent: Record<string, unknown>[]) {
 // paused, and a socket that records each command.
 const toasts: string[] = []
 
-function engine(on: any, sent: Record<string, unknown>[], state: unknown = PAUSED) {
+function engine(on: any, sent: Record<string, unknown>[], state: unknown = PAUSED, source = SOURCE) {
   on('command.register', () => ({ value: { command: 'dbg' } }))
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__clawd-debug__${e.name}` } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
-  on('fs.read', () => ({ value: SOURCE }))
+  on('fs.read', () => ({ value: source }))
   on('env.get', () => ({ value: '/run/test' }))
   on('session.id', () => ({ value: 'test-session' }))
   on('session.cwd', () => ({ value: '/work' }))
@@ -435,4 +435,52 @@ test('/dbg break sets a breakpoint and shows the file, running nothing', async (
   expect(String((out as { text?: string }).text)).toContain('Breakpoint at lib.py:12')
   expect(sent.some(one => one.cmd === 'setBreakpoints' && one.file === '/work/lib.py')).toBe(true)
   expect(sent.some(one => one.cmd === 'start')).toBe(false)
+})
+
+// A file longer than the code window: line n reads `xn = n`.
+const LONG = Array.from({ length: 80 }, (_, i) => `x${i + 1} = ${i + 1}`).join('\n')
+
+test('the mouse wheel scrolls the code, the scrollbar shows where, and a press on it moves there', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent, PAUSED, LONG)
+  on('session.root', () => ({ value: '/work' }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  // The plain lines in the window (2 and 3 carry values, so they read longer).
+  const shown = async () => (await ui.findAll({ type: 'Text', text: /^x\d+ = \d+$/, in: 'view' })).map(one => Number(/^x(\d+)/.exec(String(one.text))?.[1]))
+  expect((await shown()).at(-1)).toBe(14)
+  // A thumb on a track, at the top.
+  expect(await ui.findAll({ type: 'Text', text: '┃', in: 'view' })).toHaveLength(2)
+
+  // Three ticks down over the code: nine rows on, the cursor kept in the window.
+  await $.ui.scroll({ component: 'Pane', requestId: 'debug', by: 3, offset: 0, bodyRows: 24, contentRows: 24, origin: 'person', pointer: { row: 8, column: 20 } } as any)
+  expect(await shown()).toEqual([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23])
+
+  // A press at the bottom of the scrollbar (the view is 80 wide here): the end of the file.
+  await ui.pointer({ type: 'down', x: 77, y: 15, button: 'left', in: 'view' })
+  await ui.pointer({ type: 'up', x: 77, y: 15, button: 'left', in: 'view' })
+  expect((await shown()).at(-1)).toBe(80)
+})
+
+test('the folder of the file is shown from the project, and cut from the front when long', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  const deep = '/mnt/Pool/Projects/wp-local-dev/sites/tabdeal-wp-academy/.clawd-debug/check_content_coins_cases.php'
+  const at = (file: string) => ({ ...PAUSED, lang: 'php', program: file, breakpoints: {}, stop: { ...PAUSED.stop, file }, frames: [], lineValues: {} })
+  engine(on, sent, at(deep))
+  on('session.root', () => ({ value: '/mnt/Pool/Projects/wp-local-dev/sites/tabdeal-wp-academy' }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: '  tabdeal-wp-academy/.clawd-debug', in: 'view' })).toBeDefined()
+})
+
+test('a folder outside the project is cut at whole folders, keeping its end', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  const deep = '/mnt/Pool/Projects/wp-local-dev/sites/tabdeal-wp-academy/wp-content/themes/academy/app/Services/Currency/CurrencyPrice.php'
+  const at = (file: string) => ({ ...PAUSED, lang: 'php', program: file, breakpoints: {}, stop: { ...PAUSED.stop, file }, frames: [], lineValues: {} })
+  engine(on, sent, at(deep))
+  on('session.root', () => ({ value: '/home/me/elsewhere' }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 70 } })
+  const folder = await ui.find({ type: 'Text', text: /^  …\//, in: 'view' })
+  expect(String(folder?.props.children ?? folder?.text)).toMatch(/\/app\/Services\/Currency$/)
 })

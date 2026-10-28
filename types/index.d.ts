@@ -90,6 +90,11 @@ export type ViewProps = {
   note: string
   // The uncaught error the program stopped on, '' for none.
   error: string
+  // The session's project folder: the file's folder is shown from it.
+  root?: string
+  // Mouse wheel ticks over the pane, newest last: id counts up, by is the
+  // rows asked (negative up), row is the row of the view under the pointer.
+  wheel?: { id: number; by: number; row: number }[]
 }
 
 // What the view posts back: a key the person pressed, as a command.

@@ -30,6 +30,11 @@ let boot: () => void = () => {}
 let lastUse = 0
 // The helper failed every try: a redraw does not start it again.
 let gaveUp = false
+// The mouse wheel over the pane: the view scrolls the code or the details,
+// whichever the pointer is over (Client modules get no wheel themselves).
+let wheel: { id: number; by: number; row: number }[] = []
+// The pane's header card above the view: its border rows and three rows.
+const HEADER_ROWS = 5
 const IDLE_MS = 10 * 60_000
 const sources = new Map<string, string[]>()
 
@@ -188,9 +193,19 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" height={1} overflow="hidden">{BAR.filter(one => one.row === 1).map(button)}</Box>
           <Box flexDirection="row" height={1} overflow="hidden">{BAR.filter(one => one.row === 2).map(button)}</Box>
         </Box>
-        <Client key="view" module="./view.tsx" props={{ ...view, glyphs: g }} width="100%" height={Math.max(6, rows - 5)} />
+        <Client key="view" module="./view.tsx" props={{ ...view, glyphs: g }} width="100%" height={Math.max(6, rows - HEADER_ROWS)} />
       </Box>
     )
+  })
+
+  // The wheel: handed to the view as ticks with the row under the pointer;
+  // the pane itself never moves (its tree fits). Scroll keys go on as usual.
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (!e.pointer) return next(e)
+    const id = (wheel.at(-1)?.id ?? 0) + 1
+    wheel = [...wheel, { id, by: e.by, row: e.pointer.row - HEADER_ROWS }].slice(-20)
+    $.ui.invalidate('ui.render')
+    return {}
   })
 
   on('ui.message', async ($, e, next) => {
@@ -586,6 +601,8 @@ async function viewProps($: EngineInterface): Promise<ViewProps> {
     frames: st.frames.slice(0, 30),
     output: output.slice(-200),
     note: st.status === 'error' ? st.error ?? '' : st.status === 'ended' && st.exitCode != null ? `exited with code ${st.exitCode} · r to run again` : '',
+    root: await $.session.root().catch(() => ''),
+    wheel,
   }
 }
 
