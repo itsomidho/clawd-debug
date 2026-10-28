@@ -93,7 +93,7 @@ test('t asks Claude for test data at the breakpoints', async ($, on) => {
   const sent: Record<string, unknown>[] = []
   const prompts: string[] = []
   engine(on, sent)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '/work\n', stderr: '' } }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '/work\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('prompt.submit', (_: unknown, e: { text: string }) => { prompts.push(e.text); return { text: e.text } })
   on('ui.toast', () => ({ value: undefined }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
@@ -370,5 +370,37 @@ test('a Persian value lines up by its width on screen, not its length', async ($
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: /^ {2}بیت‌کوین {3}'BTC'$/, in: 'view' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('clicks: tabs, the gutter, a value row, a watch ✕, + Add watch, a case row', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent, WATCHED)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  // The gutter of line 2 sets or clears its breakpoint.
+  await ui.press({ key: 'gutter:2' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleBreakpoint', line: 2 })
+  // A value with children opens or folds on a click.
+  await ui.press({ key: 'row:Locals/items' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleExpand', path: ['Locals', 'items'] })
+  // A tab opens on a click; a watch goes with its ✕.
+  await ui.press({ key: 'tab:watch' })
+  expect(await ui.find({ type: 'Text', text: /^ {2}subtotal \* 2 {2}0$/, in: 'view' })).toBeDefined()
+  await ui.press({ key: 'unwatch:nope' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'removeWatch', expr: 'nope' })
+  // + Add watch opens the field.
+  await ui.press({ key: 'add-watch' })
+  expect(await ui.find({ type: 'Text', text: ' WATCH ', in: 'view' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a click on a test case reruns it alone', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent, CASES)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'row:Case/throws' })
+  expect(sent.at(-1)).toMatchObject({ cmd: 'rerunCase', name: 'throws' })
   await ui.unmount()
 })

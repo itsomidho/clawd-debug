@@ -34,7 +34,7 @@ const STEP_KEYS: Record<string, ViewMessage['cmd']> = {
 }
 
 const View: ClientModule<ViewProps, Local> = (props, surface) => {
-  const { Box, Text } = surface.elements
+  const { Box, Text, Button } = surface.elements
   const columns = Math.max(24, surface.columns || 80)
   const rows = Math.max(10, surface.rows || 30)
   const last = props.firstLine + props.lines.length - 1
@@ -85,12 +85,19 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
     const shown = values ? `  ${Object.entries(values).map(([k, v]) => `${k} = ${v}`).join(', ')}` : ''
     codeLines.push(
       <Box key={`l${n}`} flexDirection="row" width={inner} overflow="hidden" backgroundColor={isCurrent ? CURRENT_LINE : undefined}>
-        <Text color={isCurrent ? COLOR.type : isConditional ? CONDITION_COLOR : ERR} bold>{marker}</Text>
-        <Text color={isCursor ? ACCENT : LINE_NUMBER} bold={isCursor}>{` ${String(n).padStart(numberWidth)}  `}</Text>
-        <Text wrap="truncate-end" bold={isCurrent}>
-          {slide(highlight(text, lang, carry), local.left).map(seg => <Text color={seg.color} italic={seg.isComment}>{seg.text}</Text>)}
-          <Text color={VALUES} dimColor={!isCurrent}>{local.left > text.length ? shown.slice(Math.min(shown.length, local.left - text.length)) : shown}</Text>
-        </Text>
+        {/* A click on the gutter sets or clears the line's breakpoint; on the code, moves the cursor there. */}
+        <Box key={`gutterbox:${n}`} flexShrink={0}>
+          <Button key={`gutter:${n}`} plain hover={{ color: ERR }} onPress={() => { surface.post({ cmd: 'toggleBreakpoint', line: n }) }}>
+            <Text color={isCurrent ? COLOR.type : isConditional ? CONDITION_COLOR : ERR} bold>{marker}</Text>
+            <Text color={isCursor ? ACCENT : LINE_NUMBER} bold={isCursor}>{` ${String(n).padStart(numberWidth)}  `}</Text>
+          </Button>
+        </Box>
+        <Button key={`line:${n}`} plain onPress={() => { const at: Local = { ...local, ...surface.state }; surface.setState({ ...at, cursor: n, isDetails: false }) }}>
+          <Text wrap="truncate-end" bold={isCurrent}>
+            {slide(highlight(text, lang, carry), local.left).map(seg => <Text color={seg.color} italic={seg.isComment}>{seg.text}</Text>)}
+            <Text color={VALUES} dimColor={!isCurrent}>{local.left > text.length ? shown.slice(Math.min(shown.length, local.left - text.length)) : shown}</Text>
+          </Text>
+        </Button>
       </Box>,
     )
   }
@@ -110,6 +117,25 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
   // a selected row is kept in sight.
   let lowerTop = local.tab === 'output' && local.lowerTop === 0 ? Math.max(0, all.length - room) : Math.min(local.lowerTop, Math.max(0, all.length - room))
   if (selRow != null) lowerTop = selRow < lowerTop ? selRow : selRow >= lowerTop + room ? selRow - room + 1 : lowerTop
+
+  // What a click does: show a tab; select a row and act on it; start a watch.
+  const showTab = (tab: Tab) => {
+    const at: Local = { ...local, ...surface.state }
+    surface.setState({ ...at, tab, lowerTop: 0, sel: 0, isHelpHidden: true })
+  }
+  const pressItem = (rowIndex: number) => {
+    const at: Local = { ...local, ...surface.state }
+    const owner = all[rowIndex]?.owner
+    const first = items.findIndex(i => all[i]?.owner === owner)
+    const item = all[items[first] ?? -1]?.item
+    surface.setState({ ...at, isDetails: true, sel: Math.max(0, first) })
+    if (item?.canExpand) surface.post({ cmd: 'toggleExpand', path: item.path })
+    else if (item?.caseName) surface.post({ cmd: 'rerunCase', name: item.caseName })
+  }
+  const startWatch = () => {
+    const at: Local = { ...local, ...surface.state }
+    surface.setState({ ...at, typing: '', typingFor: 'watch' })
+  }
 
   surface.onKey(event => {
     const at: Local = { ...local, ...surface.state }
@@ -208,25 +234,50 @@ const View: ClientModule<ViewProps, Local> = (props, surface) => {
           const isOn = tab === local.tab && local.isHelpHidden
           const label = ` ${tabIcon[tab] ? `${tabIcon[tab]} ` : ''}${TAB_NAMES[tab]}${counts[tab] ? ` ${counts[tab]}` : ''} `
           return (
-            <Text>
-              <Text backgroundColor={isOn ? ACCENT : undefined} color={isOn ? CHIP_TEXT : tab === 'cases' && failed ? ERR : undefined} bold={isOn} dimColor={!isOn && !(tab === 'cases' && failed)}>{label}</Text>
+            <Box key={`tabbox:${tab}`} flexDirection="row">
+              <Button key={`tab:${tab}`} plain hover={isOn ? undefined : { color: ACCENT }} onPress={() => { showTab(tab) }}>
+                <Text backgroundColor={isOn ? ACCENT : undefined} color={isOn ? CHIP_TEXT : tab === 'cases' && failed ? ERR : undefined} bold={isOn} dimColor={!isOn && !(tab === 'cases' && failed)}>{label}</Text>
+              </Button>
               <Text> </Text>
-            </Text>
+            </Box>
           )
         })}
-        <Text dimColor wrap="truncate-end">{`${more ? `  ${more}` : ''}   ? keys`}</Text>
+        <Text dimColor>{more ? `  ${more}` : ''}</Text>
+        <Text>{'   '}</Text>
+        <Box key="keysbox" flexShrink={0}>
+          <Button key="keys" plain dimColor hover={{ color: ACCENT }} onPress={() => { const at: Local = { ...local, ...surface.state }; surface.setState({ ...at, isHelpHidden: !at.isHelpHidden, lowerTop: 0 }) }}>
+            <Text>{isHelp ? '? close keys' : '? keys'}</Text>
+          </Button>
+        </Box>
       </Box>
       <Box flexDirection="column" height={lowerRows - 1} overflow="hidden" paddingRight={1}>
         {lower.map((row, i) => {
           // The selected entry: a bar in the margin on each of its rows, its text bold.
           const isSel = selRow != null && row.owner === all[selRow]?.owner
+          const content = [
+            <Text color={ACCENT} bold>{isSel ? '▌' : ' '}</Text>,
+            <Text wrap="truncate-end" bold={isSel}>
+              {row.parts.map(part => <Text color={part.color} backgroundColor={part.bg} dimColor={part.dim} bold={part.bold} italic={part.italic}>{part.text}</Text>)}
+              {row.parts.length ? null : ' '}
+            </Text>,
+          ]
+          const item = row.item
+          const at = lowerTop + i
           return (
             <Box key={`d${i}`} flexDirection="row" height={1} overflow="hidden">
-              <Text color={ACCENT} bold>{isSel ? '▌' : ' '}</Text>
-              <Text wrap="truncate-end" bold={isSel}>
-                {row.parts.map(part => <Text color={part.color} backgroundColor={part.bg} dimColor={part.dim} bold={part.bold} italic={part.italic}>{part.text}</Text>)}
-                {row.parts.length ? null : ' '}
-              </Text>
+              {item
+                // A click selects the entry and does its thing: opens or folds a value, reruns a case.
+                ? <Button key={row.isFirst ? `row:${item.path.join('/')}` : `row:${item.path.join('/')}:${at}`} plain hover={{ bold: true }} onPress={() => { pressItem(at) }}>{content}</Button>
+                : row.action === 'addWatch'
+                  ? <Button key="add-watch" plain hover={{ color: ACCENT }} onPress={() => { startWatch() }}>{content}</Button>
+                  : content}
+              {item?.isWatch && row.isFirst
+                ? <Box key={`unwatchbox:${item.path[1] ?? ''}`} flexShrink={0}>
+                    <Button key={`unwatch:${item.path[1] ?? ''}`} plain dimColor hover={{ color: ERR }} onPress={() => { surface.post({ cmd: 'removeWatch', expr: item.path[1] ?? '' }) }}>
+                      <Text>{' ✕'}</Text>
+                    </Button>
+                  </Box>
+                : null}
             </Box>
           )
         })}
@@ -285,14 +336,14 @@ function valueColor(value: string): string | undefined {
 // wrapped row belongs to, so all its rows light up together.
 type Item = { path: string[]; canExpand: boolean; isOpen: boolean; isWatch: boolean; caseName?: string }
 type Part = { text: string; color?: string; bg?: string; dim?: boolean; bold?: boolean; italic?: boolean }
-type Row = { parts: Part[]; item?: Item; isFirst?: boolean; owner?: number }
+type Row = { parts: Part[]; item?: Item; isFirst?: boolean; owner?: number; action?: 'addWatch' }
 
 // Everything the details can show, each long value wrapped onto as many rows
 // as it needs (the panel scrolls them), never cut at the edge.
 function lowerPanel(props: ViewProps, tab: Tab | 'help', cursor: number, width: number, local: Local): Row[] {
   const out: Row[] = []
   // The row's room: the panel's width less the selection margin and the right padding.
-  const room = Math.max(16, width - 2)
+  const room = Math.max(16, width - 2 - (tab === 'watch' ? 2 : 0))
   let owner = 0
   const gap = () => { if (out.length && out[out.length - 1]!.parts.length) out.push({ parts: [] }) }
   // A plain line of text, wrapped.
@@ -401,12 +452,14 @@ function lowerPanel(props: ViewProps, tab: Tab | 'help', cursor: number, width: 
       }
     }
   } else if (tab === 'watch') {
-    if (!props.watches.length) add('No watch expressions. Click the code and press w to add one: it is worked out at every stop.', { dim: true })
+    if (!props.watches.length) add('No watch expressions yet: one is worked out at every stop.', { dim: true })
     else {
       section('WATCH', `${props.watches.length}${changedOf(props.watches)}`)
       if (props.status !== 'paused') add('  Worked out while the program is paused.', { dim: true })
       tree(props.watches, 0, true)
     }
+    gap()
+    out.push({ action: 'addWatch', parts: [{ text: '+ Add watch', color: ACCENT }, { text: '  (or w)', dim: true }] })
   } else if (tab === 'stack') {
     if (!props.frames.length) add('The call stack shows while the program is paused.', { dim: true })
     else {

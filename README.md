@@ -29,6 +29,8 @@ A harness reports its cases through a small helper in `helper/cases/` (`clawd_ca
 
 When the program stops, or a run ends with test cases, the pane takes the keys by itself, so the step bar's keys work without a click: `n` next, `s` into, `o` out, `c` continue, `x` ask Claude to explain this stop, `r` run, `t` test data, `q` stop, `f` rerun the next failing case. `↵` does the next thing (next at a stop, the failing case after a run). The keys below are the code view's: click the code first (Escape gives the keys back).
 
+Or use the mouse: click a line's number to set or clear its breakpoint, a line to move the cursor there, a tab to open it, a value to open or fold it, a test case to rerun it alone, `✕` to remove a watch and `+ Add watch` to add one.
+
 
 | | |
 |---|---|
