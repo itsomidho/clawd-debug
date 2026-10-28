@@ -404,3 +404,13 @@ test('a click on a test case reruns it alone', async ($, on) => {
   expect(sent.at(-1)).toMatchObject({ cmd: 'rerunCase', name: 'throws' })
   await ui.unmount()
 })
+
+test('with nothing running, the header shows b: like the bar keys, not a sentence', async ($, on) => {
+  engine(on, [], { ...PAUSED, status: 'idle', stop: null, frames: [], scopes: [] })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.findAll({ type: 'Text', text: 'b:' })).some(one => one.props.color === '#d97757')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: ' breakpoint on the cursor line' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /t runs it with test data/ })).toBeUndefined()
+  await ui.unmount()
+})

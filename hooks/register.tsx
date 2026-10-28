@@ -139,7 +139,10 @@ export const register: Register = (on, options) => {
             <Text>  </Text>
             <Text backgroundColor={chip.color} color={CHIP_TEXT} bold>{` ${chip.text} `}</Text>
             <Text>  </Text>
-            <Text dimColor wrap="truncate-end">{whereText(st)}</Text>
+            {whereText(st)
+              ? <Text dimColor wrap="truncate-end">{whereText(st)}</Text>
+              // Nothing running: how to start, drawn like the bar's keys (t is already a button below).
+              : <Text wrap="truncate-end"><Text color={ACCENT}>b:</Text><Text color={ERR}> ●</Text><Text> breakpoint on the cursor line</Text><Text dimColor> · or click a line number</Text></Text>}
           </Box>
           <Box flexDirection="row" height={1} overflow="hidden">{BAR.filter(one => one.row === 1).map(button)}</Box>
           <Box flexDirection="row" height={1} overflow="hidden">{BAR.filter(one => one.row === 2).map(button)}</Box>
@@ -378,6 +381,8 @@ const BAR: Bar[] = [
 const ACCENT = '#d97757'
 const BORDER = '#5c6370'
 const CHIP_TEXT = '#1e2127'
+// The breakpoint dot, as the code view draws it.
+const ERR = '#e06c75'
 const HOVER = { color: 'cyan', underline: true } as const
 
 // The status chip of the header card.
@@ -409,7 +414,8 @@ function whereText(st: DebugState): string {
   if (st.status === 'ended') return `${name(st.program)}${st.exitCode != null ? ` · exit ${st.exitCode}` : ''}`
   if (st.status === 'error') return st.error ?? ''
   if (st.status === 'running' || st.status === 'starting') return name(st.program)
-  return 'b on a line sets a breakpoint, t runs it with test data'
+  // Nothing running: the header draws the b hint in its place.
+  return ''
 }
 
 // ---------------------------------------------------------------- icons
