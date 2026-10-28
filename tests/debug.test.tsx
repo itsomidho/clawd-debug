@@ -21,8 +21,16 @@ const PANE = {
   props: { title: 'Debug', isFocused: true, bodyColumns: 90, placement: 'dock', scroll: { offset: 0, bodyRows: 24 }, view: {} },
 } as const
 
+// The last command a key or button sent, past the ones a starting helper is
+// given by itself (the breakpoints and watches the pane remembers).
+function lastAct(sent: Record<string, unknown>[]) {
+  return sent.filter(one => one.cmd !== 'setBreakpoints' && one.cmd !== 'restore').at(-1)
+}
+
 // Stands for the engine and the helper: a helper that says it is ready and
 // paused, and a socket that records each command.
+const toasts: string[] = []
+
 function engine(on: any, sent: Record<string, unknown>[], state: unknown = PAUSED) {
   on('command.register', () => ({ value: { command: 'dbg' } }))
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__clawd-debug__${e.name}` } }))
@@ -33,6 +41,10 @@ function engine(on: any, sent: Record<string, unknown>[], state: unknown = PAUSE
   on('session.id', () => ({ value: 'test-session' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('ui.log', () => ({ value: undefined }))
+  on('clock.every', () => ({ value: undefined }))
+  // The wait for a starting helper: long enough for the fake one to say it is ready.
+  on('clock.sleep', async () => { await new Promise(resolve => setTimeout(resolve, 3000)); return { value: undefined } })
+  on('ui.toast', (_: unknown, e: unknown) => { toasts.push(String((e as { text?: string }).text ?? e)); return { value: undefined } })
   on('process.spawn', async function* () {
     yield { stream: 'stdout', text: `${JSON.stringify({ type: 'ready', socket: '/run/test.sock' })}\n` }
     // A list of states: one stop after another.
@@ -66,11 +78,11 @@ test('the pane shows the paused line, its breakpoint and what each line set', as
 
   // A step key in the view becomes a command to the helper.
   await ui.key({ key: 'n', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'next' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'next' })
 
   // b sets a breakpoint where the cursor is: the paused line.
   await ui.key({ key: 'b', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleBreakpoint', file: FILE, line: 4 })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'toggleBreakpoint', file: FILE, line: 4 })
   await ui.unmount()
 })
 
@@ -95,7 +107,6 @@ test('t asks Claude for test data at the breakpoints', async ($, on) => {
   engine(on, sent)
   on('process.run', () => ({ value: { exitCode: 0, stdout: '/work\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('prompt.submit', (_: unknown, e: { text: string }) => { prompts.push(e.text); return { text: e.text } })
-  on('ui.toast', () => ({ value: undefined }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
 
   const ui = await $.ui.mount(PANE)
@@ -179,7 +190,7 @@ test('w types a watch expression and Enter adds it', async ($, on) => {
   // While typing, n is a letter, not a step.
   expect(sent.some(one => one.cmd === 'next')).toBe(false)
   await ui.key({ key: 'return', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'addWatch', expr: 'n+1' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'addWatch', expr: 'n+1' })
   await ui.unmount()
 })
 
@@ -205,13 +216,13 @@ test('e moves the keys into the details: an open row shows its children, Enter f
   await ui.key({ key: 'e', in: 'view' })
   // The first selectable row is items (the Line section above is not selectable).
   await ui.key({ key: 'return', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleExpand', path: ['Locals', 'items'] })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'toggleExpand', path: ['Locals', 'items'] })
   // In the details, ↓ moves the selection, not the code cursor; b still sets a breakpoint.
   await ui.key({ key: 'down', in: 'view' })
   await ui.key({ key: 'down', in: 'view' })
   await ui.key({ key: 'down', in: 'view' })
   await ui.key({ key: 'b', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleBreakpoint', line: 4 })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'toggleBreakpoint', line: 4 })
   await ui.unmount()
 })
 
@@ -224,7 +235,7 @@ test('d on a selected watch removes it', async ($, on) => {
   await ui.key({ key: 'e', in: 'view' })
   await ui.key({ key: 'down', in: 'view' })
   await ui.key({ key: 'd', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'removeWatch', expr: 'nope' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'removeWatch', expr: 'nope' })
   await ui.unmount()
 })
 
@@ -241,7 +252,7 @@ test('B sets a condition on the line; a conditional breakpoint is drawn ◆ with
   expect(await ui.find({ type: 'Text', text: ' BREAK AT 4 WHEN ', in: 'view' })).toBeDefined()
   for (const key of ['backspace', '2']) await ui.key({ key, in: 'view' })
   await ui.key({ key: 'return', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'setCondition', line: 4, condition: 'item > 2' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'setCondition', line: 4, condition: 'item > 2' })
   await ui.unmount()
 })
 
@@ -266,10 +277,10 @@ test('a run with test cases opens them on the first failing case; ↵ reruns it 
   expect(await ui.find({ type: 'Text', text: /^ {4}got +\[\]$/, in: 'view' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^ {4}error +TypeError: boom$/, in: 'view' })).toBeDefined()
   await ui.key({ key: 'return', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'rerunCase', name: 'nbsp' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'rerunCase', name: 'nbsp' })
   await ui.key({ key: 'down', in: 'view' })
   await ui.key({ key: 'return', in: 'view' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'rerunCase', name: 'throws' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'rerunCase', name: 'throws' })
   await ui.unmount()
 })
 
@@ -278,12 +289,11 @@ test('the step bar steps with its buttons, and x asks Claude to explain the stop
   const prompts: string[] = []
   engine(on, sent)
   on('prompt.submit', (_: unknown, e: { text: string }) => { prompts.push(e.text); return { text: e.text } })
-  on('ui.toast', () => ({ value: undefined }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount(PANE)
   for (const key of ['bar:n', 'bar:s', 'bar:o', 'bar:c', 'bar:x', 'bar:q']) expect(await ui.find({ key })).toBeDefined()
   await ui.press({ key: 'bar:n' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'next' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'next' })
   await ui.press({ key: 'bar:x' })
   expect(prompts.at(-1)).toContain('debug_state')
   await ui.unmount()
@@ -296,7 +306,7 @@ test('f reruns the failing cases in turn, and the bar starts on it after a run w
   const ui = await $.ui.mount(PANE)
   expect((await ui.find({ key: 'bar:f' }))?.props.autoFocus).toBe(true)
   await ui.press({ key: 'bar:f' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'rerunCase', name: 'nbsp' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'rerunCase', name: 'nbsp' })
   // A step button while nothing is paused does nothing.
   const before = sent.length
   await ui.press({ key: 'bar:n' })
@@ -380,15 +390,15 @@ test('clicks: tabs, the gutter, a value row, a watch ✕, + Add watch, a case ro
   const ui = await $.ui.mount(PANE)
   // The gutter of line 2 sets or clears its breakpoint.
   await ui.press({ key: 'gutter:2' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleBreakpoint', line: 2 })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'toggleBreakpoint', line: 2 })
   // A value with children opens or folds on a click.
   await ui.press({ key: 'row:Locals/items' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'toggleExpand', path: ['Locals', 'items'] })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'toggleExpand', path: ['Locals', 'items'] })
   // A tab opens on a click; a watch goes with its ✕.
   await ui.press({ key: 'tab:watch' })
   expect(await ui.find({ type: 'Text', text: /^ {2}subtotal \* 2 {2}0$/, in: 'view' })).toBeDefined()
   await ui.press({ key: 'unwatch:nope' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'removeWatch', expr: 'nope' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'removeWatch', expr: 'nope' })
   // + Add watch opens the field.
   await ui.press({ key: 'add-watch' })
   expect(await ui.find({ type: 'Text', text: ' WATCH ', in: 'view' })).toBeDefined()
@@ -401,7 +411,7 @@ test('a click on a test case reruns it alone', async ($, on) => {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'row:Case/throws' })
-  expect(sent.at(-1)).toMatchObject({ cmd: 'rerunCase', name: 'throws' })
+  expect(lastAct(sent)).toMatchObject({ cmd: 'rerunCase', name: 'throws' })
   await ui.unmount()
 })
 
@@ -413,4 +423,16 @@ test('with nothing running, the header shows b: like the bar keys, not a sentenc
   expect(await ui.find({ type: 'Text', text: ' breakpoint on the cursor line' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /t runs it with test data/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('/dbg break sets a breakpoint and shows the file, running nothing', async ($, on) => {
+  const sent: Record<string, unknown>[] = []
+  engine(on, sent)
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false, realPath: '/work/lib.py' } }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const out = await $.command.run({ command: 'dbg', args: 'break lib.py:12' })
+  expect(String((out as { text?: string }).text)).toContain('Breakpoint at lib.py:12')
+  expect(sent.some(one => one.cmd === 'setBreakpoints' && one.file === '/work/lib.py')).toBe(true)
+  expect(sent.some(one => one.cmd === 'start')).toBe(false)
 })

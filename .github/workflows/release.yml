@@ -1,0 +1,81 @@
+# Tags and releases every version this push brought.
+#
+# A version is the "version" in .claude-plugin/plugin.json. For each commit of
+# the push that changed it to a version with no tag yet, this makes the
+# annotated tag v<version> on that commit and a GitHub release whose notes are
+# the commit's message (less its first line and Co-Authored-By lines). Only the
+# newest version is marked Latest. A version already tagged (by hand, or by an
+# earlier run) is left alone, so running twice changes nothing.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: [.claude-plugin/plugin.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Tag and release new versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          name=$(node -p "require('./.claude-plugin/plugin.json').name")
+          version_at() {
+            git show "$1:.claude-plugin/plugin.json" 2>/dev/null \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).version||"")}catch{}})'
+          }
+
+          # The commits to look at: this push's, or (run by hand, or on a new
+          # branch) every commit that touched plugin.json.
+          if [[ -n ${BEFORE:-} && ! $BEFORE =~ ^0+$ ]] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            range="$BEFORE..HEAD"
+          else
+            range="HEAD"
+          fi
+
+          # Each commit whose version differs from its parent's, oldest first.
+          new=()
+          for c in $(git rev-list --reverse "$range" -- .claude-plugin/plugin.json); do
+            v=$(version_at "$c")
+            p=$(version_at "$c^" || true)
+            [[ -z $v || $v == "$p" ]] && continue
+            git rev-parse -q --verify "refs/tags/v$v" >/dev/null && continue
+            new+=("$c $v")
+          done
+
+          if (( ${#new[@]} == 0 )); then
+            echo "No new version to release."
+            exit 0
+          fi
+
+          last=$(( ${#new[@]} - 1 ))
+          for i in "${!new[@]}"; do
+            read -r c v <<<"${new[$i]}"
+            notes=$(git show -s --format=%b "$c" | sed '/^Co-Authored-By:/d' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+            [[ -z $notes ]] && notes="$(git show -s --format=%s "$c")"
+            latest=false
+            (( i == last )) && [[ $(version_at HEAD) == "$v" ]] && latest=true
+            git tag -a "v$v" -m "$name $v" "$c"
+            git push origin "v$v"
+            gh release create "v$v" --verify-tag --title "v$v" --notes "$notes" --latest="$latest"
+            echo "Released $name $v at ${c:0:7}."
+          done

@@ -23,6 +23,14 @@ const shown = atom({ plugin: 'clawd-debug', key: 'shown' } as const, '')
 // The helper's socket, once it said it is ready. A reload starts a new one.
 let socket = ''
 let whenReady: Promise<string> = new Promise(() => {})
+// The running helper (null while none runs), how to start one, and when it
+// was last used: it stops after IDLE_MS idle.
+let helper: { stop: () => void } | null = null
+let boot: () => void = () => {}
+let lastUse = 0
+// The helper failed every try: a redraw does not start it again.
+let gaveUp = false
+const IDLE_MS = 10 * 60_000
 const sources = new Map<string, string[]>()
 
 type Answer = { ok: boolean; error?: string; state?: DebugState; result?: string; type?: string; vars?: { name: string; value: string }[] }
@@ -35,72 +43,103 @@ export const register: Register = (on, options) => {
     // session about 0.6 s to open, and they are in place before the first prompt.
     // A tool's {cases} is where the test-case helpers are, in this install.
     void Promise.all([
-      $.command.register({ name: 'dbg', description: 'Step debugger: /dbg <file>[:line] [args], /dbg next|in|out|continue|stop, /dbg setup' }),
+      $.command.register({ name: 'dbg', description: 'Step debugger: /dbg <file>[:line] [args], /dbg break <file>:<line>, /dbg next|in|out|continue|stop, /dbg setup' }),
       ...TOOLS.map(tool => $.tool.register({ ...tool, description: tool.description.replaceAll('{cases}', `${$.plugin.root}/helper/cases`) })),
     ]).catch(error => $.ui.log(`registering /dbg and the tools failed: ${String(error)}`, { to: 'debug' }))
 
-    // The helper lives as long as the module: leaving the loop kills it.
+    // The helper starts on first use (boot, from send) and stops after
+    // IDLE_MS with nothing paused or running: most sessions never debug, and
+    // each helper is a node process. Leaving the loop kills it.
     const runtime = (await $.env.get('XDG_RUNTIME_DIR')) || '/tmp'
     const id = (await $.session.id()).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12)
-    // A resumed session keeps its id: a random tail keeps each start's socket its own.
-    const path = `${runtime}/clawd-debug-${id}-${crypto.randomUUID().slice(0, 8)}.sock`
-    let resolveReady: (s: string) => void = () => {}
-    whenReady = new Promise(resolve => { resolveReady = resolve })
-    void (async () => {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        let buffer = ''
-        try {
-          const child = $.process.spawn({ argv: ['node', `${$.plugin.root}/helper/dapd.mjs`, '--socket', path] })
-          for await (const { stream, text } of child) {
-            if (stream === 'stderr') { $.ui.log(text.trimEnd(), { to: 'debug' }); continue }
-            buffer += text
-            let cut = buffer.indexOf('\n')
-            while (cut >= 0) {
-              const line = buffer.slice(0, cut)
-              buffer = buffer.slice(cut + 1)
-              cut = buffer.indexOf('\n')
-              let message: { type?: string; socket?: string; state?: DebugState }
-              try { message = JSON.parse(line) } catch { continue }
-              if (message.type === 'ready' && message.socket) {
-                socket = message.socket
-                resolveReady(socket)
-                // A reload starts a fresh helper: give it the breakpoints the pane still shows.
-                const kept = await read($, dbg)
-                for (const [file, list] of Object.entries(kept.breakpoints)) {
-                  if (list.length) await send($, { cmd: 'setBreakpoints', file, breakpoints: list.map(b => ({ line: b.line, condition: b.condition ?? '' })) })
+    boot = () => {
+      if (helper) return
+      // A random tail keeps each start's socket its own (a resumed session keeps its id).
+      const path = `${runtime}/clawd-debug-${id}-${crypto.randomUUID().slice(0, 8)}.sock`
+      let resolveReady: (s: string) => void = () => {}
+      whenReady = new Promise(resolve => { resolveReady = resolve })
+      const run = { stop: () => {} }
+      helper = run
+      void (async () => {
+        for (let attempt = 0; attempt < 5 && helper === run; attempt++) {
+          let buffer = ''
+          try {
+            const child = $.process.spawn({ argv: ['node', `${$.plugin.root}/helper/dapd.mjs`, '--socket', path] })
+            run.stop = () => { void child.return?.(undefined as never) }
+            for await (const { stream, text } of child) {
+              if (stream === 'stderr') { $.ui.log(text.trimEnd(), { to: 'debug' }); continue }
+              buffer += text
+              let cut = buffer.indexOf('\n')
+              while (cut >= 0) {
+                const line = buffer.slice(0, cut)
+                buffer = buffer.slice(cut + 1)
+                cut = buffer.indexOf('\n')
+                let message: { type?: string; socket?: string; state?: DebugState }
+                try { message = JSON.parse(line) } catch { continue }
+                if (message.type === 'ready' && message.socket) {
+                  socket = message.socket
+                  resolveReady(socket)
+                  // A reload starts a fresh helper: give it the breakpoints the pane still shows.
+                  const kept = await read($, dbg)
+                  for (const [file, list] of Object.entries(kept.breakpoints)) {
+                    if (list.length) await send($, { cmd: 'setBreakpoints', file, breakpoints: list.map(b => ({ line: b.line, condition: b.condition ?? '' })) })
+                  }
+                  // ...and its watches and open rows.
+                  const watches = (kept.watches ?? []).map(w => w.expr)
+                  if (watches.length || kept.expanded?.length) await send($, { cmd: 'restore', watches, expanded: kept.expanded ?? [] })
                 }
-                // ...and its watches and open rows.
-                const watches = (kept.watches ?? []).map(w => w.expr)
-                if (watches.length || kept.expanded?.length) await send($, { cmd: 'restore', watches, expanded: kept.expanded ?? [] })
-              }
-              else if (message.type === 'state' && message.state) {
-                const st = message.state
-                if (st.status === 'starting') sources.clear()
-                // Every stop is remembered as it comes, so the next one can mark what changed.
-                trackChanges(st)
-                await update($, dbg, () => st)
-                // A new stop, or a run that ended with test cases: the pane takes
-                // the keys (when the prompt is idle and empty), so n/s/o/c and the
-                // bar's keys work without a click first.
-                const mark = st.status === 'paused' ? `p:${st.runId}:${st.steps}` : st.status === 'ended' && st.cases?.length ? `e:${st.runId}` : ''
-                if (mark && mark !== lastFocus) {
-                  lastFocus = mark
-                  // ...and its focus moves where Enter does the next thing: the
-                  // failing cases' rerun after a run, next at a stop.
-                  const target = st.status === 'ended' && st.cases?.some(c => !c.ok) ? 'bar:f' : st.status === 'paused' ? 'bar:n' : ''
-                  void $.ui.open({ id: PANE, title: 'Debug', columns: 96, focus: true })
-                    .then(() => (target ? $.ui.focus({ requestId: PANE, key: target }) : undefined))
-                    .catch(() => {})
+                else if (message.type === 'state' && message.state) {
+                  const st = message.state
+                  if (st.status === 'starting') sources.clear()
+                  // Every stop is remembered as it comes, so the next one can mark what changed.
+                  trackChanges(st)
+                  await update($, dbg, () => st)
+                  // A new stop, or a run that ended with test cases: the pane takes
+                  // the keys (when the prompt is idle and empty), so n/s/o/c and the
+                  // bar's keys work without a click first.
+                  const mark = st.status === 'paused' ? `p:${st.runId}:${st.steps}` : st.status === 'ended' && st.cases?.length ? `e:${st.runId}` : ''
+                  if (mark && mark !== lastFocus) {
+                    lastFocus = mark
+                    // ...and its focus moves where Enter does the next thing: the
+                    // failing cases' rerun after a run, next at a stop.
+                    const target = st.status === 'ended' && st.cases?.some(c => !c.ok) ? 'bar:f' : st.status === 'paused' ? 'bar:n' : ''
+                    void $.ui.open({ id: PANE, title: 'Debug', columns: 96, focus: true })
+                      .then(() => (target ? $.ui.focus({ requestId: PANE, key: target }) : undefined))
+                      .catch(() => {})
+                  }
                 }
               }
             }
+          } catch (error) {
+            $.ui.log(`helper failed: ${String(error)}`, { to: 'debug' })
           }
-        } catch (error) {
-          $.ui.log(`helper failed: ${String(error)}`, { to: 'debug' })
+          socket = ''
         }
+        // Out of tries: no redraw starts it again, only a command does.
+        if (helper === run) { helper = null; gaveUp = true }
+      })()
+    }
+
+    // No helper runs yet: a run the pane remembers as paused or running (from
+    // before a reload or a resume) is over.
+    await update($, dbg, st => (['paused', 'running', 'starting'].includes(st.status)
+      ? { ...st, status: 'ended' as const, stop: null, frames: [] }
+      : st))
+
+    // Stop an idle helper; the next command starts a new one, which gets the
+    // breakpoints, watches and open rows the pane still shows.
+    $.clock.every(60_000, () => {
+      void (async () => {
+        if (!helper || !socket || Date.now() - lastUse < IDLE_MS) return
+        const st = await read($, dbg)
+        if (st.status === 'paused' || st.status === 'running' || st.status === 'starting') return
+        const run = helper
+        helper = null
         socket = ''
-      }
-    })()
+        run.stop()
+        $.ui.log('debug helper stopped after being idle', { to: 'debug' })
+      })()
+    })
     return started
   })
 
@@ -112,6 +151,8 @@ export const register: Register = (on, options) => {
       return <Text>The debugger draws in the terminal for now.</Text>
     }
     const { Box, Button, Client, Text } = $.ui.resolve(e)
+    // The pane open on screen: the debugger is about to be used.
+    if (!helper && !gaveUp) { lastUse = Date.now(); boot() }
     const st = await read($, dbg)
     const view = await viewProps($)
     const rows = e.props.scroll?.bodyRows ?? 30
@@ -171,6 +212,23 @@ export const register: Register = (on, options) => {
       return { text: 'Debug pane opened. Click it, then: b breakpoint · t test data · r run · n next · s into · o out · c continue · q stop.' }
     }
     if (word === 'setup') return { text: await setup($) }
+    // /dbg break <file>:<line>: a breakpoint there and the file in the pane,
+    // nothing run (what clawd-logs' Debug button asks for).
+    if (word === 'break') {
+      const spot = /^(.+):(\d+)$/.exec(args.slice(word.length).trim())
+      if (!spot?.[1] || !spot[2]) return { text: 'Usage: /dbg break <file>:<line>' }
+      const cwd = await $.session.cwd()
+      const file = await realPath($, spot[1].startsWith('/') ? spot[1] : `${cwd}/${spot[1]}`)
+      if (!(await $.fs.exists(file))) return { text: `No such file: ${file}` }
+      const line = Number(spot[2])
+      const had = ((await read($, dbg)).breakpoints[file] ?? []).map(b => ({ line: b.line, condition: b.condition ?? '' }))
+      const answer = await send($, { cmd: 'setBreakpoints', file, breakpoints: [...had.filter(b => b.line !== line), { line, condition: '' }] })
+      await update($, shown, () => file)
+      await openPane($)
+      return { text: answer.ok
+        ? `Breakpoint at ${file.split('/').pop()}:${line}. Press t in the pane (or ask Claude) to run it with test data.`
+        : `Not set: ${answer.error}` }
+    }
     if (steps[word]) {
       const answer = await send($, { cmd: steps[word], wait: true, timeoutMs: 10000 })
       return { text: answer.ok ? await summary($, answer.state ?? EMPTY, 6) : `Not done: ${answer.error}` }
@@ -263,6 +321,8 @@ export const register: Register = (on, options) => {
 // ---------------------------------------------------------------- helpers
 
 async function send($: EngineInterface, body: Record<string, unknown>): Promise<Answer> {
+  lastUse = Date.now()
+  if (!socket && !helper) { gaveUp = false; boot() }
   const path = socket || (await Promise.race([whenReady, new Promise<string>(resolve => setTimeoutish($, resolve))]))
   if (!path) return { ok: false, error: 'the debug helper is not running (is node on PATH?)' }
   try {

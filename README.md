@@ -46,7 +46,7 @@ Or use the mouse: click a line's number to set or clear its breakpoint, a line t
 | `w` | add a watch expression (typed in the pane, `↵` adds it); `d` on a selected watch removes it |
 | `tab`, `?` | Variables / Watch / Stack / Output, hide the key hints |
 
-`/dbg next`, `/dbg in`, `/dbg out`, `/dbg continue`, `/dbg stop` do the same from the prompt.
+`/dbg next`, `/dbg in`, `/dbg out`, `/dbg continue`, `/dbg stop` do the same from the prompt. `/dbg break file.php:42` sets a breakpoint and shows the file without running anything ([clawd-logs](https://github.com/itsomidho/clawd-logs)' **Debug** button uses it).
 
 ## What each language needs
 
@@ -64,7 +64,7 @@ Claude's test scripts go in `.clawd-debug/` in your project; Claude adds that fo
 
 ## How it works
 
-A small helper process (`helper/dapd.mjs`) talks to each language's debugger: DAP for Python, the V8 inspector for Node, DBGp for Xdebug. It runs debuggers without a terminal, so they cannot take your terminal from Claude Code. The mod draws the pane and gives Claude five tools: `debug_start`, `debug_step`, `debug_state`, `debug_watch` and `debug_breakpoints`.
+A small helper process (`helper/dapd.mjs`) talks to each language's debugger: DAP for Python, the V8 inspector for Node, DBGp for Xdebug. It runs debuggers without a terminal, so they cannot take your terminal from Claude Code. It starts the first time you use the debugger in a session and stops after 10 minutes idle, so sessions that never debug run no helper. The mod draws the pane and gives Claude five tools: `debug_start`, `debug_step`, `debug_state`, `debug_watch` and `debug_breakpoints`.
 
 ## Development
 
