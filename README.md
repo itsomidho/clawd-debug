@@ -1,6 +1,12 @@
 # clawd-debug
 
+[![Latest release](https://img.shields.io/github/v/release/itsomidho/clawd-debug?label=release&color=7fbeb3)](https://github.com/itsomidho/clawd-debug/releases) [![Wiki](https://img.shields.io/badge/docs-wiki-7fbeb3)](https://github.com/itsomidho/clawd-debug/wiki)
+
 A step debugger for [Claude Code](https://claude.com/claude-code), in a pane beside the conversation. Set a breakpoint, let Claude run your code with test data, and step through it line by line while every variable, and what each line set, shows next to the code. No editor needed.
+
+![clawd-debug in a real session: five test cases run and one fails; a breakpoint goes in cart.js, the failing case reruns alone, and stepping shows its total turn into NaN](docs/debug.gif)
+
+<sub>Recorded: a harness of five cases runs, one fails (an item without a quantity); with a breakpoint in `cart.js` the failing case reruns alone, and two steps show `line` and then `subtotal` become `NaN`.</sub>
 
 Works with **Python**, **JavaScript (Node)** and **PHP**, including PHP inside a Docker container with Xdebug, such as a local WordPress site.
 
@@ -80,16 +86,27 @@ The first runs the helper against real debuggers: Node always, Python when debug
 At the prompt of a terminal session:
 
 ```
-/plugin install clawd-debug --marketplace itsomidho/clawd-debug
+/plugin install clawd-debug --marketplace itsomidho/claude-plugins
 ```
 
 Answer `y` to add the marketplace, then pick a scope. From a shell:
 
 ```
-claude plugin install clawd-debug --marketplace itsomidho/clawd-debug
+claude plugin install clawd-debug --marketplace itsomidho/claude-plugins
 ```
 
-In the desktop app, where `/plugin` does not run: click + next to the prompt box, then Plugins, Add marketplace with `itsomidho/clawd-debug`, then Add plugin.
+In the desktop app, where `/plugin` does not run: click + next to the prompt box, then Plugins, Add marketplace with `itsomidho/claude-plugins`, then Add plugin.
+
+## The clawd family
+
+clawd-debug is one of seven plugins in the [`itsomidho` marketplace](https://github.com/itsomidho/claude-plugins); each works on its own:
+
+- [clawd-statusbar](https://github.com/itsomidho/clawd-statusbar): a framed status bar under the prompt: context, usage limits with reset times, git state, MR/PR pipeline status, and Clawd frying an egg while Claude works
+- [clawd-tasks](https://github.com/itsomidho/clawd-tasks): a live task board: Claude's plan, and under each task the steps it took, how long it ran, the files it changed and the agents it started
+- [clawd-guard](https://github.com/itsomidho/clawd-guard): a safety net: stops risky shell commands, writes to secret files and leaked keys before they run
+- [clawd-notify](https://github.com/itsomidho/clawd-notify): tells you when Claude is done or needs you: a desktop notification, a chime, and optionally a push to your phone
+- [clawd-git](https://github.com/itsomidho/clawd-git): a live git panel beside the conversation: the file tree, changes, colored diffs and the commit graph; marks what Claude changed, stages, commits and asks Claude to review
+- [clawd-logs](https://github.com/itsomidho/clawd-logs): watches your project's error logs (WordPress debug.log, nginx, any log file): new errors show above the prompt, grouped, with a Fix button, and Claude hears about the ones its own work caused
 
 ## License
 
